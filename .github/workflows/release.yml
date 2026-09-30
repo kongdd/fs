@@ -1,0 +1,58 @@
+name: Release ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target "${{ matrix.target }}"
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then VERSION="dev"; fi
+          NAME="nasfind-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "$NAME"
+          cp "target/${{ matrix.target }}/release/nasfind" "$NAME/nasfind"
+          cp dist/install.sh dist/uninstall.sh "$NAME/"
+          cp examples/config.toml "$NAME/config.toml.example"
+          cp dist/nasfind-update.service dist/nasfind-update.timer "$NAME/"
+          cp README.md LICENSE "$NAME/"
+          zip -9 -r "$NAME.zip" "$NAME"
+          sha256sum "$NAME.zip" > "$NAME.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nasfind-linux-${{ matrix.arch }}
+          path: |
+            nasfind-*.zip
+            nasfind-*.zip.sha256
+      - name: Upload GitHub release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nasfind-*.zip
+            nasfind-*.zip.sha256

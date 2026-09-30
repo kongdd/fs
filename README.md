@@ -128,6 +128,17 @@ sudo systemctl enable --now nasfind-update.timer
 
 The provided service expects `/etc/nasfind/config.toml`; copy and edit `examples/config.toml` first.
 
+## Development checks
+
+```bash
+make check  # formatting, Clippy and unit tests
+make e2e    # release build and real plocate indexing/search tests
+```
+
+The end-to-end script uses a temporary directory and cleans it up automatically.
+CI runs the same script. Indexing uses the configured exclusions, overriding
+system `updatedb` pruning defaults that may otherwise skip NAS filesystems.
+
 ## License
 
 MIT. `plocate` is a separate external dependency and keeps its own license.

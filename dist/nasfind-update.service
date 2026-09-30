@@ -1,0 +1,9 @@
+[Unit]
+Description=Update nasfind plocate databases
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nasfind --config /etc/nasfind/config.toml index --no-progress
+Nice=10
+IOSchedulingClass=idle

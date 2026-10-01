@@ -45,12 +45,12 @@ if grep -F "soil_archive.txt" <<<"$out"; then exit 1; fi
 test -n "$("$BIN" --config "$ROOT/config.toml" search -d research soil)"
 # Byte-safe filenames, streaming JSON, limits and real backend errors.
 python3 - "$BIN" "$ROOT" <<'PYTEST'
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, shutil, subprocess, sys
 binary, root = sys.argv[1:]
 base = pathlib.Path(root)
 config = str(base / "config.toml")
-def run(*args):
-    return subprocess.run([binary, "--config", config, *args], capture_output=True, timeout=10)
+def run(*args, env=None):
+    return subprocess.run([binary, "--config", config, *args], capture_output=True, timeout=10, env=env)
 
 def search(*args):
     result = run("search", *args)
@@ -74,6 +74,25 @@ assert set(search("-0", "byte_soil").split(b"\0")[:-1]) == expected
 assert len(json.loads(search("--json", "byte_soil"))) == 2
 assert b"\xef\xbf\xbd" not in search("byte_soil")
 
+# Explicit DB selection must ignore ambient LOCATE_PATH.
+ambient = run("search", "-d", "research", "soil", env={**os.environ, "LOCATE_PATH": root + "/archive.db"})
+assert ambient.returncode == 0, ambient.stderr
+assert (root + "/archive/soil_archive.txt").encode() not in ambient.stdout
+
+# A pattern beginning with '-' must remain a pattern, not a backend option.
+(base / "archive/--version").touch()
+assert run("index", "archive", "--no-progress").returncode == 0
+assert search("-d", "archive", "--", "--version") == (root + "/archive/--version\n").encode()
+
+# plocate uses ':' as a DB-list separator and '\\' as an escape character.
+odd_db = base / "colon:back\\slash.db"
+shutil.copyfile(base / "archive.db", odd_db)
+odd_config = base / "odd-config.toml"
+odd_config.write_text('[[index]]\nname="archive"\nroot=' + json.dumps(root + '/archive') + '\ndatabase=' + json.dumps(str(odd_db)) + '\n')
+odd = subprocess.run([binary, "--config", str(odd_config), "search", "soil"], capture_output=True, timeout=10)
+assert odd.returncode == 0, odd.stderr
+assert odd.stdout == (root + "/archive/soil_archive.txt\n").encode()
+
 # A readable but corrupt DB must not look like an empty successful search.
 (base / "research.db").write_bytes(b"not a plocate database")
 assert run("search", "-d", "research", "soil").returncode != 0
@@ -84,5 +103,12 @@ mock.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('failure' 
 mock.chmod(0o755)
 (base / "config.toml").write_text('[tools]\nplocate = ' + json.dumps(str(mock)) + '\n[[index]]\nname="research"\nroot=' + json.dumps(root + '/research') + '\ndatabase=' + json.dumps(root + '/research.db') + '\n')
 assert run("search", "soil").returncode != 0
+
+# Reaching a filtered limit must not suppress an already reported backend error.
+mock.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('backend failure\\n')\nsys.stderr.flush()\nsys.stdout.buffer.write(" + repr((root + '/research/soil.nc').encode() + b'\0') + ")\nsys.stdout.flush()\nsys.exit(1)\n")
+with (base / "config.toml").open("a") as f:
+    f.write('exclude_extensions=["tmp"]\n')
+assert run("search", "-l", "1", "soil").returncode != 0
+
 PYTEST
 echo "End-to-end plocate tests passed"

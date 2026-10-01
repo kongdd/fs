@@ -31,7 +31,7 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
 
     let mut cmd = Command::new(&cfg.tools.updatedb);
     // Override system pruning defaults: they commonly exclude NAS filesystems.
-    // updatedb has no --config-file option.
+    // plocate 1.1.19 lacks the newer --config-file option.
     cmd.arg("--prune-bind-mounts")
         .arg("no")
         .arg("--prunefs")

@@ -1,7 +1,7 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io::{self, BufRead, BufReader, BufWriter, Write},
-    os::unix::ffi::OsStrExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -64,8 +64,17 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     let has_filters = indexes.iter().any(|idx| !idx.exclude_extensions.is_empty());
 
     let mut cmd = Command::new(&cfg.tools.plocate);
+    cmd.env_remove("LOCATE_PATH");
     for idx in &indexes {
-        cmd.arg("-d").arg(&idx.database);
+        // -d accepts a colon-separated list with backslash escaping.
+        let mut database = Vec::new();
+        for &byte in idx.database.as_os_str().as_bytes() {
+            if matches!(byte, b':' | b'\\') {
+                database.push(b'\\');
+            }
+            database.push(byte);
+        }
+        cmd.arg("-d").arg(OsString::from_vec(database));
     }
     if options.ignore_case {
         cmd.arg("-i");
@@ -83,7 +92,8 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     if !has_filters && let Some(limit) = options.limit {
         cmd.arg("-l").arg(limit.to_string());
     }
-    cmd.args(&options.patterns)
+    cmd.arg("--")
+        .args(&options.patterns)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -159,7 +169,7 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     // A multi-DB query may exit 1 even with output if one DB has no matches.
     // Backend errors also use 1, but emit diagnostics.
     let empty_database = status.code() == Some(1) && diagnostic_bytes == 0;
-    if !(stopped_early || status.success() || empty_database) {
+    if !(status.success() || empty_database || (stopped_early && diagnostic_bytes == 0)) {
         bail!("plocate exited with status {status}");
     }
     if options.json {

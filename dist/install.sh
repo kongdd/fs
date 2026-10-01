@@ -10,14 +10,15 @@ if [ "$(uname -s)" != "Linux" ]; then
     exit 1
 fi
 
-for cmd in plocate updatedb; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "missing dependency: $cmd (install the plocate package first)" >&2
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+for cmd in plocate updatedb plocate-build sort; do
+    if [ ! -x "$SCRIPT_DIR/tools/bin/$cmd" ] && ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "missing dependency: $cmd (run python3 setup-tools.py, or install plocate and GNU sort)" >&2
         exit 1
     fi
 done
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BIN="$SCRIPT_DIR/nasfind"
 
 # Binary release ZIPs place `nasfind` next to this script. In a source checkout,
@@ -44,6 +45,12 @@ fi
 
 install -d "$BINDIR" "$DATADIR"
 install -m 0755 "$BIN" "$BINDIR/nasfind"
+if [ -d "$SCRIPT_DIR/tools" ]; then
+    TOOL_DIR="$PREFIX/lib/nasfind/tools"
+    install -d "$TOOL_DIR"
+    cp -R "$SCRIPT_DIR/tools/." "$TOOL_DIR/"
+    chmod 0755 "$TOOL_DIR"
+fi
 if [ -f "$SCRIPT_DIR/config.toml.example" ]; then
     install -m 0644 "$SCRIPT_DIR/config.toml.example" "$DATADIR/config.toml.example"
 elif [ -f "$SCRIPT_DIR/../examples/config.toml" ]; then

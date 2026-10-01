@@ -20,16 +20,22 @@ pub struct SearchOptions {
     /// One or more plocate patterns. Multiple patterns are ANDed.
     #[arg(required = true)]
     pub patterns: Vec<String>,
+    /// Match without ASCII/locale case sensitivity.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
+    /// Match filenames only, ignoring directory names.
     #[arg(short = 'b', long)]
     pub basename: bool,
+    /// Check that matches still exist (accesses the filesystem/NAS).
     #[arg(short = 'e', long)]
     pub existing: bool,
+    /// Stop after this many unfiltered matches.
     #[arg(short = 'l', long)]
     pub limit: Option<usize>,
+    /// Write a JSON array of paths.
     #[arg(long, conflicts_with = "null")]
     pub json: bool,
+    /// Separate raw paths with NUL bytes, for piping to other tools.
     #[arg(short = '0', long = "null")]
     pub null: bool,
 }
@@ -61,9 +67,9 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
             );
         }
     }
-    let has_filters = indexes
-        .iter()
-        .any(|idx| !idx.filters.exclude_extensions.is_empty());
+    let has_filters = indexes.iter().any(|idx| {
+        !idx.filters.exclude_extensions.is_empty() || !idx.filters.exclude_files.is_empty()
+    });
 
     let mut cmd = Command::new(&cfg.tools.plocate);
     cmd.env_remove("LOCATE_PATH");
@@ -134,7 +140,7 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
             if buf.last() == Some(&0) {
                 buf.pop();
             }
-            if has_filters && is_excluded_by_extension(&buf, &indexes) {
+            if has_filters && is_excluded(&buf, &indexes) {
                 continue;
             }
 
@@ -181,11 +187,8 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     Ok(())
 }
 
-fn is_excluded_by_extension(path: &[u8], indexes: &[&IndexConfig]) -> bool {
+fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
     let path_obj = Path::new(OsStr::from_bytes(path));
-    let Some(ext) = path_obj.extension() else {
-        return false;
-    };
 
     // A result should belong to exactly one configured root. Longest-prefix matching
     // handles nested roots deterministically.
@@ -200,9 +203,16 @@ fn is_excluded_by_extension(path: &[u8], indexes: &[&IndexConfig]) -> bool {
     }
 
     owner.is_some_and(|idx| {
-        idx.filters.exclude_extensions.iter().any(|blocked| {
-            ext.as_bytes()
-                .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
+        path_obj.file_name().is_some_and(|name| {
+            idx.filters
+                .exclude_files
+                .iter()
+                .any(|blocked| name.as_bytes().eq_ignore_ascii_case(blocked.as_bytes()))
+        }) || path_obj.extension().is_some_and(|ext| {
+            idx.filters.exclude_extensions.iter().any(|blocked| {
+                ext.as_bytes()
+                    .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
+            })
         })
     })
 }
@@ -228,18 +238,15 @@ mod tests {
     #[test]
     fn extension_filter_is_case_insensitive() {
         let a = idx("a", "/data", &["tmp", ".pyc"]);
-        assert!(is_excluded_by_extension(b"/data/x.TMP", &[&a]));
-        assert!(is_excluded_by_extension(b"/data/x.pyc", &[&a]));
-        assert!(!is_excluded_by_extension(b"/data/x.nc", &[&a]));
+        assert!(is_excluded(b"/data/x.TMP", &[&a]));
+        assert!(is_excluded(b"/data/x.pyc", &[&a]));
+        assert!(!is_excluded(b"/data/x.nc", &[&a]));
     }
 
     #[test]
     fn nested_root_uses_longest_match() {
         let outer = idx("outer", "/data", &["tmp"]);
         let inner = idx("inner", "/data/keep", &[]);
-        assert!(!is_excluded_by_extension(
-            b"/data/keep/file.tmp",
-            &[&outer, &inner]
-        ));
+        assert!(!is_excluded(b"/data/keep/file.tmp", &[&outer, &inner]));
     }
 }

@@ -1,24 +1,53 @@
-name: Release ZIP
+name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths: [Cargo.toml, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  package:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check existing release and remove old checksum attachments
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            ASSETS=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[] | select(.name | endswith(".zip.sha256")) | .id')
+            for id in $ASSETS; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+            done
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file docs/release-notes.md
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.published == 'false'
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
             arch: x86_64
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -26,33 +55,62 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --target "${{ matrix.target }}"
-      - name: Package
-        shell: bash
+          components: rustfmt, clippy
+      - name: Install musl compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
+      - name: Check source
+        run: make check
+      - name: Package static executable
+        env:
+          TARGET: ${{ matrix.target }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
-          set -euo pipefail
-          VERSION=${GITHUB_REF_NAME#v}
-          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then VERSION="dev"; fi
-          NAME="nasfind-${VERSION}-linux-${{ matrix.arch }}"
-          mkdir -p "$NAME"
-          cp "target/${{ matrix.target }}/release/nasfind" "$NAME/nasfind"
-          cp dist/install.sh dist/uninstall.sh "$NAME/"
-          cp examples/config.toml "$NAME/config.toml.example"
-          cp dist/nasfind-update.service dist/nasfind-update.timer "$NAME/"
-          cp README.md LICENSE "$NAME/"
-          zip -9 -r "$NAME.zip" "$NAME"
-          sha256sum "$NAME.zip" > "$NAME.zip.sha256"
+          bash scripts/package.sh
+          file target/${{ matrix.target }}/release/nasfind | tee binary-type.txt
+          grep -Eq 'statically linked|static-pie linked' binary-type.txt
+      - name: Prepare private tools and test packaged executable
+        run: |
+          PACKAGE=$(find dist-out -mindepth 1 -maxdepth 1 -type d)
+          python3 "$PACKAGE/setup-tools.py"
+          export PATH="$PWD/$PACKAGE/tools/bin:$PATH"
+          bash scripts/test-e2e.sh "$PACKAGE/nasfind"
+          PREFIX="$RUNNER_TEMP/installed" DATADIR="$RUNNER_TEMP/config" sh "$PACKAGE/install.sh"
+          "$RUNNER_TEMP/installed/bin/nasfind" --version
+          mkdir -p "$RUNNER_TEMP/smoke/files/project"
+          touch "$RUNNER_TEMP/smoke/files/project/sample.nc"
+          cat > "$RUNNER_TEMP/smoke/config.toml" <<EOF
+          [[index]]
+          name = "smoke"
+          root = "$RUNNER_TEMP/smoke/files"
+          database = "$RUNNER_TEMP/smoke/main.db"
+          EOF
+          export PATH=/usr/bin:/bin
+          "$RUNNER_TEMP/installed/bin/nasfind" --config "$RUNNER_TEMP/smoke/config.toml" doctor
+          "$RUNNER_TEMP/installed/bin/nasfind" --config "$RUNNER_TEMP/smoke/config.toml" index --no-progress
+          "$RUNNER_TEMP/installed/bin/nasfind" --config "$RUNNER_TEMP/smoke/config.toml" index --folder "$RUNNER_TEMP/smoke/files/project" --no-progress
+          "$RUNNER_TEMP/installed/bin/nasfind" --config "$RUNNER_TEMP/smoke/config.toml" sample | grep -F sample.nc
       - uses: actions/upload-artifact@v4
         with:
-          name: nasfind-linux-${{ matrix.arch }}
-          path: |
-            nasfind-*.zip
-            nasfind-*.zip.sha256
-      - name: Upload GitHub release assets
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+          name: release-${{ matrix.arch }}
+          path: dist-out/*.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          files: |
-            nasfind-*.zip
-            nasfind-*.zip.sha256
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          gh release create "v$VERSION" release-assets/*.zip --target "$GITHUB_SHA" \
+            --title "nasfind v$VERSION" --notes-file docs/release-notes.md

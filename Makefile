@@ -13,4 +13,4 @@ e2e:
 	bash scripts/test-e2e.sh
 
 package:
-	./scripts/package.sh
+	bash scripts/package.sh

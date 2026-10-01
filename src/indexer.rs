@@ -39,7 +39,7 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         .arg("--prunepaths")
         .arg("")
         .arg("--prunenames")
-        .arg(idx.exclude_dirs.join(" "))
+        .arg(idx.filters.exclude_dirs.join(" "))
         .arg("-l")
         .arg("0")
         .arg("-U")
@@ -47,7 +47,7 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         .arg("-o")
         .arg(&idx.database);
 
-    for path in &idx.exclude_paths {
+    for path in &idx.filters.exclude_paths {
         let absolute = if path.is_absolute() {
             path.clone()
         } else {

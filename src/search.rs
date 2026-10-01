@@ -61,7 +61,9 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
             );
         }
     }
-    let has_filters = indexes.iter().any(|idx| !idx.exclude_extensions.is_empty());
+    let has_filters = indexes
+        .iter()
+        .any(|idx| !idx.filters.exclude_extensions.is_empty());
 
     let mut cmd = Command::new(&cfg.tools.plocate);
     cmd.env_remove("LOCATE_PATH");
@@ -198,7 +200,7 @@ fn is_excluded_by_extension(path: &[u8], indexes: &[&IndexConfig]) -> bool {
     }
 
     owner.is_some_and(|idx| {
-        idx.exclude_extensions.iter().any(|blocked| {
+        idx.filters.exclude_extensions.iter().any(|blocked| {
             ext.as_bytes()
                 .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
         })
@@ -216,9 +218,10 @@ mod tests {
             name: name.into(),
             root: PathBuf::from(root),
             database: PathBuf::from(format!("/tmp/{name}.db")),
-            exclude_dirs: vec![],
-            exclude_paths: vec![],
-            exclude_extensions: exts.iter().map(|s| s.to_string()).collect(),
+            filters: crate::config::Filters {
+                exclude_extensions: exts.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
         }
     }
 

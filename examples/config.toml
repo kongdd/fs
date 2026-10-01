@@ -2,18 +2,17 @@
 plocate = "plocate"
 updatedb = "updatedb"
 
-[[index]]
-name = "research"
-root = "/volume1/research"
-database = "/var/lib/nasfind/research.db"
+[filters]
 exclude_dirs = [".git", "node_modules", "target", "@eaDir", "#recycle"]
 exclude_paths = []
 exclude_extensions = ["tmp", "part", "pyc"]
 
 [[index]]
+name = "research"
+root = "/volume1/research"
+database = "/var/lib/nasfind/research.db"
+
+[[index]]
 name = "archive"
 root = "/volume2/archive"
 database = "/var/lib/nasfind/archive.db"
-exclude_dirs = ["@eaDir", "#recycle"]
-exclude_paths = []
-exclude_extensions = ["tmp", "part"]

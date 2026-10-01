@@ -51,21 +51,26 @@ nasfind index
 plocate = "plocate"
 updatedb = "updatedb"
 
+[filters]
+exclude_dirs = [".git", "node_modules", "target", "@eaDir", "#recycle"]
+exclude_paths = []
+exclude_extensions = ["tmp", "part", "pyc"]
+
 [[index]]
 name = "research"
 root = "/volume1/research"
 database = "/var/lib/nasfind/research.db"
-exclude_dirs = [".git", "node_modules", "target", "@eaDir", "#recycle"]
-exclude_paths = ["/volume1/research/cache with spaces"]
-exclude_extensions = ["tmp", "part", "pyc"]
 
 [[index]]
 name = "archive"
 root = "/volume2/archive"
 database = "/var/lib/nasfind/archive.db"
-exclude_dirs = ["@eaDir", "#recycle"]
-exclude_extensions = ["tmp"]
 ```
+
+Rules in `[filters]` apply to every database. An `[[index]]` may add its own
+`exclude_dirs`, `exclude_paths`, or `exclude_extensions`; exclusions are combined,
+so an empty per-index list does not disable global rules. Relative excluded paths
+are resolved against each index root; absolute paths are used as written.
 
 `exclude_dirs` is passed to plocate's `PRUNENAMES`, so entries must be plain directory names without
 spaces or `/`. Use `exclude_paths` for exact paths (including paths containing spaces).

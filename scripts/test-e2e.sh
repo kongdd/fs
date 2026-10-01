@@ -2,21 +2,31 @@
 set -euo pipefail
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nasfind-e2e.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
-mkdir -p "$ROOT/research/node_modules" "$ROOT/research/cache with spaces" "$ROOT/archive"
+mkdir -p "$ROOT/research/node_modules" "$ROOT/research/cache with spaces" "$ROOT/archive/node_modules" "$ROOT/archive/cache with spaces" "$ROOT/research/private" "$ROOT/archive/private"
 touch "$ROOT/research/soil_moisture.nc"
 touch "$ROOT/research/ignore.tmp"
 touch "$ROOT/research/node_modules/hidden_soil.js"
 touch "$ROOT/research/cache with spaces/hidden_soil.nc"
 touch "$ROOT/archive/soil_archive.txt"
+touch "$ROOT/archive/node_modules/hidden_soil.js"
+touch "$ROOT/archive/cache with spaces/hidden_soil.nc"
+touch "$ROOT/archive/ignore.TMP"
+touch "$ROOT/research/private/local_visibility.txt"
+touch "$ROOT/archive/private/local_visibility.txt"
+touch "$ROOT/research/ignore.pyc"
 
 cat > "$ROOT/config.toml" <<EOF2
+[filters]
+exclude_dirs = ["node_modules"]
+exclude_paths = ["cache with spaces"]
+exclude_extensions = ["tmp"]
+
 [[index]]
 name = "research"
 root = "$ROOT/research"
 database = "$ROOT/research.db"
-exclude_dirs = ["node_modules"]
-exclude_paths = ["cache with spaces"]
-exclude_extensions = ["tmp"]
+exclude_dirs = ["private"]
+exclude_extensions = ["pyc"]
 
 [[index]]
 name = "archive"
@@ -58,6 +68,8 @@ def search(*args):
     return result.stdout
 
 assert json.loads(search("--json", "nothing_matches_123")) == []
+assert search("ignore") == b""
+assert search("local_visibility") == (root + "/archive/private/local_visibility.txt\n").encode()
 rows = json.loads(search("--json", "soil"))
 assert {r["path"] for r in rows} == {root + "/research/soil_moisture.nc", root + "/archive/soil_archive.txt"}
 assert len(json.loads(search("--json", "-l", "1", "soil"))) == 1

@@ -11,6 +11,8 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default)]
     pub tools: Tools,
+    #[serde(default)]
+    pub filters: Filters,
     pub index: Vec<IndexConfig>,
 }
 
@@ -44,6 +46,12 @@ pub struct IndexConfig {
     pub name: String,
     pub root: PathBuf,
     pub database: PathBuf,
+    #[serde(flatten)]
+    pub filters: Filters,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Filters {
     #[serde(default)]
     pub exclude_dirs: Vec<String>,
     #[serde(default)]
@@ -65,10 +73,26 @@ impl Config {
 
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text)
+        let cfg = Self::parse(&text)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
-        cfg.validate()?;
         Ok((cfg, path))
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let mut cfg: Self = toml::from_str(text)?;
+        for idx in &mut cfg.index {
+            idx.filters
+                .exclude_dirs
+                .extend(cfg.filters.exclude_dirs.iter().cloned());
+            idx.filters
+                .exclude_paths
+                .extend(cfg.filters.exclude_paths.iter().cloned());
+            idx.filters
+                .exclude_extensions
+                .extend(cfg.filters.exclude_extensions.iter().cloned());
+        }
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -102,7 +126,7 @@ impl Config {
             if !dbs.insert(&idx.database) {
                 bail!("duplicate database path: {}", idx.database.display());
             }
-            for name in &idx.exclude_dirs {
+            for name in &idx.filters.exclude_dirs {
                 if name.chars().any(char::is_whitespace) {
                     bail!(
                         "index {} exclude_dirs entry {:?} contains whitespace; use exclude_paths instead",
@@ -168,7 +192,7 @@ mod tests {
 
     #[test]
     fn parses_example_config() {
-        let cfg: Config = toml::from_str(EXAMPLE_CONFIG).unwrap();
+        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.index.len(), 2);
         assert_eq!(cfg.index[0].name, "research");
@@ -177,7 +201,7 @@ mod tests {
 
     #[test]
     fn selects_named_indexes() {
-        let cfg: Config = toml::from_str(EXAMPLE_CONFIG).unwrap();
+        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
         let selected = cfg.select(&["archive".into()]).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "archive");
@@ -185,7 +209,38 @@ mod tests {
 
     #[test]
     fn rejects_unknown_indexes() {
-        let cfg: Config = toml::from_str(EXAMPLE_CONFIG).unwrap();
+        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
         assert!(cfg.select(&["missing".into()]).is_err());
+    }
+
+    #[test]
+    fn combines_global_and_local_filters() {
+        let text = EXAMPLE_CONFIG.replace(
+            "name = \"research\"",
+            "exclude_extensions = [\"local\"]\nname = \"research\"",
+        );
+        let cfg = Config::parse(&text).unwrap();
+        assert!(
+            cfg.index[0]
+                .filters
+                .exclude_extensions
+                .contains(&"local".into())
+        );
+        for idx in &cfg.index {
+            assert!(idx.filters.exclude_extensions.contains(&"tmp".into()));
+            assert!(idx.filters.exclude_dirs.contains(&"node_modules".into()));
+        }
+        assert!(
+            !cfg.index[1]
+                .filters
+                .exclude_extensions
+                .contains(&"local".into())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_global_directory_filter() {
+        let text = EXAMPLE_CONFIG.replace("node_modules", "cache with spaces");
+        assert!(Config::parse(&text).is_err());
     }
 }

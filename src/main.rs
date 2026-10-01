@@ -49,26 +49,7 @@ enum Commands {
     },
 
     /// Search one or more configured databases.
-    Search {
-        /// Restrict search to named indexes. May be repeated.
-        #[arg(short = 'd', long = "index")]
-        indexes: Vec<String>,
-        #[arg(short = 'i', long)]
-        ignore_case: bool,
-        #[arg(short = 'b', long)]
-        basename: bool,
-        #[arg(short = 'e', long)]
-        existing: bool,
-        #[arg(short = 'l', long)]
-        limit: Option<usize>,
-        #[arg(long)]
-        json: bool,
-        #[arg(short = '0', long = "null")]
-        null: bool,
-        /// One or more plocate patterns. Multiple patterns are ANDed.
-        #[arg(required = true)]
-        patterns: Vec<String>,
-    },
+    Search(SearchOptions),
 
     /// Check configuration and external dependencies.
     Doctor,
@@ -91,31 +72,9 @@ fn run() -> Result<()> {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
             indexer::build_indexes(&cfg, &names, !no_progress)
         }
-        Commands::Search {
-            indexes,
-            ignore_case,
-            basename,
-            existing,
-            limit,
-            json,
-            null,
-            patterns,
-        } => {
+        Commands::Search(options) => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
-            search::search(
-                &cfg,
-                &SearchOptions {
-                    indexes,
-                    patterns,
-                    ignore_case,
-                    basename,
-                    existing,
-                    limit,
-                    json,
-                    null,
-                },
-            )?;
-            Ok(())
+            search::search(&cfg, &options)
         }
         Commands::Doctor => doctor(cli.config.as_deref()),
     }

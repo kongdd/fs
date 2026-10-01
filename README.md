@@ -107,6 +107,10 @@ nasfind doctor
 
 Multiple patterns are passed directly to plocate and therefore use AND semantics.
 
+Text and `--null` output preserve filename bytes; use `--null` for names containing
+newlines. JSON is streamed as a compact array with bounded buffering. Since JSON
+requires Unicode, invalid UTF-8 filename bytes are replaced in JSON output.
+
 ## Why this design?
 
 The goal is minimum custom code and maximum reuse of a mature high-performance index. `plocate` uses
@@ -135,7 +139,8 @@ make check  # formatting, Clippy and unit tests
 make e2e    # release build and real plocate indexing/search tests
 ```
 
-The end-to-end script uses a temporary directory and cleans it up automatically.
+The end-to-end script requires plocate and Python 3, uses a temporary directory,
+and cleans it up automatically.
 CI runs the same script. Indexing uses the configured exclusions, overriding
 system `updatedb` pruning defaults that may otherwise skip NAS filesystems.
 

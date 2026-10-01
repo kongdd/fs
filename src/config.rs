@@ -82,7 +82,7 @@ impl Config {
             if idx.name.trim().is_empty() {
                 bail!("index name cannot be empty");
             }
-            if !names.insert(idx.name.clone()) {
+            if !names.insert(&idx.name) {
                 bail!("duplicate index name: {}", idx.name);
             }
             if !idx.root.is_absolute() {
@@ -99,7 +99,7 @@ impl Config {
                     idx.database.display()
                 );
             }
-            if !dbs.insert(idx.database.clone()) {
+            if !dbs.insert(&idx.database) {
                 bail!("duplicate database path: {}", idx.database.display());
             }
             for name in &idx.exclude_dirs {
@@ -127,18 +127,16 @@ impl Config {
             return Ok(self.index.iter().collect());
         }
 
-        let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let selected: Vec<_> = self
+        for name in names {
+            if !self.index.iter().any(|idx| &idx.name == name) {
+                bail!("unknown index name: {name}");
+            }
+        }
+        let selected = self
             .index
             .iter()
-            .filter(|idx| wanted.contains(idx.name.as_str()))
+            .filter(|idx| names.contains(&idx.name))
             .collect();
-
-        let found: HashSet<&str> = selected.iter().map(|idx| idx.name.as_str()).collect();
-        let missing: Vec<_> = wanted.difference(&found).copied().collect();
-        if !missing.is_empty() {
-            bail!("unknown index name(s): {}", missing.join(", "));
-        }
         Ok(selected)
     }
 }
@@ -162,29 +160,7 @@ pub fn default_config_path() -> Option<PathBuf> {
     system.is_file().then_some(system)
 }
 
-pub const EXAMPLE_CONFIG: &str = r##"# nasfind configuration
-# Each [[index]] is maintained as a separate plocate database.
-
-[tools]
-plocate = "plocate"
-updatedb = "updatedb"
-
-[[index]]
-name = "research"
-root = "/volume1/research"
-database = "/var/lib/nasfind/research.db"
-exclude_dirs = [".git", "node_modules", "target", "@eaDir", "#recycle"]
-exclude_paths = []
-exclude_extensions = ["tmp", "part", "pyc"]
-
-[[index]]
-name = "archive"
-root = "/volume2/archive"
-database = "/var/lib/nasfind/archive.db"
-exclude_dirs = ["@eaDir", "#recycle"]
-exclude_paths = []
-exclude_extensions = ["tmp", "part"]
-"##;
+pub const EXAMPLE_CONFIG: &str = include_str!("../examples/config.toml");
 
 #[cfg(test)]
 mod tests {

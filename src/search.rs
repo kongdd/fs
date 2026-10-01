@@ -1,7 +1,10 @@
 use std::{
-    io::{BufRead, BufReader, Write},
+    ffi::OsStr,
+    io::{self, BufRead, BufReader, BufWriter, Write},
+    os::unix::ffi::OsStrExt,
     path::Path,
     process::{Command, Stdio},
+    thread,
 };
 
 use anyhow::{Context, Result, bail};
@@ -9,15 +12,25 @@ use serde::Serialize;
 
 use crate::config::{Config, IndexConfig};
 
-#[derive(Debug, Clone)]
+#[derive(clap::Args, Debug)]
 pub struct SearchOptions {
+    /// Restrict search to named indexes. May be repeated.
+    #[arg(short = 'd', long = "index")]
     pub indexes: Vec<String>,
+    /// One or more plocate patterns. Multiple patterns are ANDed.
+    #[arg(required = true)]
     pub patterns: Vec<String>,
+    #[arg(short = 'i', long)]
     pub ignore_case: bool,
+    #[arg(short = 'b', long)]
     pub basename: bool,
+    #[arg(short = 'e', long)]
     pub existing: bool,
+    #[arg(short = 'l', long)]
     pub limit: Option<usize>,
+    #[arg(long, conflicts_with = "null")]
     pub json: bool,
+    #[arg(short = '0', long = "null")]
     pub null: bool,
 }
 
@@ -26,7 +39,7 @@ struct JsonResult<'a> {
     path: &'a str,
 }
 
-pub fn search(cfg: &Config, options: &SearchOptions) -> Result<usize> {
+pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     if options.patterns.is_empty() {
         bail!("at least one search pattern is required");
     }
@@ -72,7 +85,7 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<usize> {
     }
     cmd.args(&options.patterns)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -81,63 +94,84 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<usize> {
         .stdout
         .take()
         .context("plocate stdout was not captured")?;
+    // Drain diagnostics concurrently so errors cannot fill a pipe and block queries.
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("plocate stderr was not captured")?;
+    let diagnostics = thread::spawn(move || io::copy(&mut stderr, &mut io::stderr().lock()));
     let mut reader = BufReader::new(stdout);
+    let mut output = BufWriter::new(io::stdout().lock());
     let mut buf = Vec::new();
-    let mut accepted = Vec::<String>::new();
     let mut written = 0_usize;
     let mut stopped_early = false;
 
-    loop {
-        buf.clear();
-        let n = reader
-            .read_until(0, &mut buf)
-            .context("failed reading plocate output")?;
-        if n == 0 {
-            break;
-        }
-        if buf.last() == Some(&0) {
-            buf.pop();
-        }
-        let path = String::from_utf8_lossy(&buf).into_owned();
-        if is_excluded_by_extension(&path, &indexes) {
-            continue;
-        }
-
+    let result: Result<()> = (|| {
         if options.json {
-            accepted.push(path);
-        } else if options.null {
-            std::io::stdout().write_all(path.as_bytes())?;
-            std::io::stdout().write_all(&[0])?;
-        } else {
-            println!("{path}");
+            output.write_all(b"[")?;
         }
-        written += 1;
+        loop {
+            buf.clear();
+            if reader
+                .read_until(0, &mut buf)
+                .context("failed reading plocate output")?
+                == 0
+            {
+                break;
+            }
+            if buf.last() == Some(&0) {
+                buf.pop();
+            }
+            if has_filters && is_excluded_by_extension(&buf, &indexes) {
+                continue;
+            }
 
-        if has_filters && options.limit.is_some_and(|limit| written >= limit) {
-            stopped_early = true;
-            child.kill().ok();
-            break;
+            if options.json {
+                if written > 0 {
+                    output.write_all(b",")?;
+                }
+                // JSON requires Unicode; raw text and NUL output retain filename bytes.
+                let path = String::from_utf8_lossy(&buf);
+                serde_json::to_writer(&mut output, &JsonResult { path: &path })?;
+            } else {
+                output.write_all(&buf)?;
+                output.write_all(if options.null { b"\0" } else { b"\n" })?;
+            }
+            written += 1;
+            if has_filters && options.limit.is_some_and(|limit| written >= limit) {
+                stopped_early = true;
+                break;
+            }
         }
-    }
+        Ok(())
+    })();
 
-    if options.json {
-        let rows: Vec<_> = accepted.iter().map(|path| JsonResult { path }).collect();
-        serde_json::to_writer_pretty(std::io::stdout(), &rows)?;
-        println!();
+    // Reap the child even if output fails (for example, a downstream pipe closes).
+    if stopped_early || result.is_err() {
+        child.kill().ok();
     }
-
+    drop(reader);
     let status = child.wait().context("failed waiting for plocate")?;
-    // plocate exits 1 both for errors and no matches. Empty successful output is normal for us.
-    // If we intentionally killed the process after reaching a filtered limit, ignore the status.
-    if !stopped_early && !status.success() && written > 0 {
+    let diagnostic_bytes = diagnostics
+        .join()
+        .map_err(|_| anyhow::anyhow!("diagnostic reader panicked"))??;
+    result?;
+    // A multi-DB query may exit 1 even with output if one DB has no matches.
+    // Backend errors also use 1, but emit diagnostics.
+    let empty_database = status.code() == Some(1) && diagnostic_bytes == 0;
+    if !(stopped_early || status.success() || empty_database) {
         bail!("plocate exited with status {status}");
     }
-    Ok(written)
+    if options.json {
+        output.write_all(b"]\n")?;
+    }
+    output.flush()?;
+    Ok(())
 }
 
-fn is_excluded_by_extension(path: &str, indexes: &[&IndexConfig]) -> bool {
-    let path_obj = Path::new(path);
-    let Some(ext) = path_obj.extension().and_then(|s| s.to_str()) else {
+fn is_excluded_by_extension(path: &[u8], indexes: &[&IndexConfig]) -> bool {
+    let path_obj = Path::new(OsStr::from_bytes(path));
+    let Some(ext) = path_obj.extension() else {
         return false;
     };
 
@@ -154,9 +188,10 @@ fn is_excluded_by_extension(path: &str, indexes: &[&IndexConfig]) -> bool {
     }
 
     owner.is_some_and(|idx| {
-        idx.exclude_extensions
-            .iter()
-            .any(|blocked| ext.eq_ignore_ascii_case(blocked.trim_start_matches('.')))
+        idx.exclude_extensions.iter().any(|blocked| {
+            ext.as_bytes()
+                .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
+        })
     })
 }
 
@@ -180,9 +215,9 @@ mod tests {
     #[test]
     fn extension_filter_is_case_insensitive() {
         let a = idx("a", "/data", &["tmp", ".pyc"]);
-        assert!(is_excluded_by_extension("/data/x.TMP", &[&a]));
-        assert!(is_excluded_by_extension("/data/x.pyc", &[&a]));
-        assert!(!is_excluded_by_extension("/data/x.nc", &[&a]));
+        assert!(is_excluded_by_extension(b"/data/x.TMP", &[&a]));
+        assert!(is_excluded_by_extension(b"/data/x.pyc", &[&a]));
+        assert!(!is_excluded_by_extension(b"/data/x.nc", &[&a]));
     }
 
     #[test]
@@ -190,7 +225,7 @@ mod tests {
         let outer = idx("outer", "/data", &["tmp"]);
         let inner = idx("inner", "/data/keep", &[]);
         assert!(!is_excluded_by_extension(
-            "/data/keep/file.tmp",
+            b"/data/keep/file.tmp",
             &[&outer, &inner]
         ));
     }

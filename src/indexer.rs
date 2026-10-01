@@ -81,15 +81,31 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
             .stdout
             .take()
             .context("updatedb stdout was not captured")?;
-        let reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout);
+        let mut current = Vec::new();
         let terminal = std::io::stderr().is_terminal();
         let mut last_report = Instant::now();
 
-        for line in reader.lines() {
-            let current = line.context("failed to read updatedb progress")?;
+        loop {
+            current.clear();
+            if reader
+                .read_until(b'\n', &mut current)
+                .context("failed to read updatedb progress")?
+                == 0
+            {
+                break;
+            }
             count += 1;
-            if last_report.elapsed() >= Duration::from_millis(250) {
-                report_progress(&idx.name, count, start.elapsed(), &current, terminal)?;
+            if (terminal && last_report.elapsed() >= Duration::from_millis(250))
+                || (!terminal && count.is_multiple_of(100_000))
+            {
+                report_progress(
+                    &idx.name,
+                    count,
+                    start.elapsed(),
+                    String::from_utf8_lossy(&current).trim_end(),
+                    terminal,
+                )?;
                 last_report = Instant::now();
             }
         }

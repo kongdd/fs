@@ -43,6 +43,7 @@ jobs:
           done
           ln -s "$TOOLS/root/usr/bin/plocate" "$TOOLS/bin/plocate"
           ln -s "$TOOLS/root/usr/sbin/updatedb.plocate" "$TOOLS/bin/updatedb"
+          ln -s "$TOOLS/root/usr/sbin/plocate-build" "$TOOLS/bin/plocate-build"
           echo "$TOOLS/bin" >> "$GITHUB_PATH"
           LIBURING=$(find "$TOOLS/root" -name 'liburing.so.2*' | head -n1)
           test -n "$LIBURING"

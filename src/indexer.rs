@@ -1,23 +1,268 @@
 use std::{
+    ffi::OsString,
     fs,
-    io::{BufRead, BufReader, IsTerminal, Write},
+    io::{BufRead, BufReader, BufWriter, IsTerminal, Write},
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::{DirBuilderExt, OpenOptionsExt},
+    },
+    path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, IndexConfig};
 
-pub fn build_indexes(cfg: &Config, names: &[String], progress: bool) -> Result<()> {
-    let selected = cfg.select(names)?;
-    for idx in selected {
-        build_one(cfg, idx, progress)?;
+pub fn build_indexes(
+    cfg: &Config,
+    names: &[String],
+    folders: &[PathBuf],
+    progress: bool,
+) -> Result<()> {
+    if folders.is_empty() {
+        for idx in cfg.select(names)? {
+            build_one(cfg, idx, progress)?;
+        }
+        return Ok(());
+    }
+    let mut selected = Vec::new();
+    for folder in folders {
+        let folder = fs::canonicalize(folder)
+            .with_context(|| format!("cannot resolve folder {}", folder.display()))?;
+        if !folder.is_dir() {
+            bail!("not a directory: {}", folder.display());
+        }
+        let (owner, root) = cfg
+            .index
+            .iter()
+            .filter_map(|idx| {
+                let root = fs::canonicalize(&idx.root).ok()?;
+                folder.starts_with(&root).then_some((idx, root))
+            })
+            .max_by_key(|(_, root)| root.components().count())
+            .with_context(|| {
+                format!(
+                    "folder {} is outside all available index roots",
+                    folder.display()
+                )
+            })?;
+        if folder != root {
+            let relative = folder.strip_prefix(&root)?;
+            if relative.components().any(|part| {
+                owner
+                    .filters
+                    .exclude_dirs
+                    .iter()
+                    .any(|name| part.as_os_str() == name.as_str())
+            }) {
+                bail!(
+                    "folder is excluded by directory rules: {}",
+                    folder.display()
+                );
+            }
+            for excluded in &owner.filters.exclude_paths {
+                let excluded = if excluded.is_absolute() {
+                    excluded.clone()
+                } else {
+                    root.join(excluded)
+                };
+                let excluded = fs::canonicalize(&excluded).unwrap_or(excluded);
+                if folder.starts_with(excluded) {
+                    bail!("folder is excluded by path rules: {}", folder.display());
+                }
+            }
+            if !owner.database.is_file() {
+                bail!("build the main DB first: nasfind index {}", owner.name);
+            }
+        }
+        if !selected.iter().any(|(_, path, _)| path == &folder) {
+            selected.push((owner, folder, root));
+        }
+    }
+    for (idx, folder, root) in &selected {
+        // An ancestor selection already covers all selected descendants in the same DB.
+        if selected.iter().any(|(other, ancestor, _)| {
+            other.name == idx.name && ancestor != folder && folder.starts_with(ancestor)
+        }) {
+            continue;
+        }
+        if folder == root {
+            build_one(cfg, idx, progress)?;
+        } else {
+            merge_folder(cfg, idx, folder, root, progress)?;
+        }
+    }
+    Ok(())
+}
+
+// The OS releases this advisory lock even if the process crashes.
+fn lock_database(database: &Path) -> Result<fs::File> {
+    if let Some(parent) = database.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut path = database.as_os_str().to_os_string();
+    path.push(".lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    lock.try_lock()
+        .with_context(|| format!("database is already being updated: {}", database.display()))?;
+    Ok(lock)
+}
+
+struct Workspace(PathBuf);
+
+impl Workspace {
+    fn new(database: &Path) -> Result<Self> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = database
+            .parent()
+            .context("database has no parent")?
+            .join(format!(".nasfind-{}-{nonce}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn merge_folder(
+    cfg: &Config,
+    idx: &IndexConfig,
+    folder: &Path,
+    root: &Path,
+    progress: bool,
+) -> Result<()> {
+    let _lock = lock_database(&idx.database)?;
+    let workspace = Workspace::new(&idx.database)?;
+    let mut subtree = idx.clone();
+    subtree.root = folder.to_path_buf();
+    subtree.database = workspace.0.join("subtree.db");
+    // Relative exclusions still refer to the original index root, not the subtree.
+    for path in &mut subtree.filters.exclude_paths {
+        if path.is_relative() {
+            *path = root.join(&*path);
+        }
+    }
+    build_one(cfg, &subtree, progress)?;
+    let paths = workspace.0.join("paths.txt");
+    let mut output = BufWriter::new(fs::File::create(&paths)?);
+    // Replace the whole subtree's old list, so deletions and renames are handled too.
+    export_paths(cfg, &idx.database, Some(folder), &mut output)?;
+    export_paths(cfg, &subtree.database, None, &mut output)?;
+    output.flush()?;
+    drop(output);
+    let sorted = workspace.0.join("sorted.txt");
+    let status = Command::new(&cfg.tools.sort)
+        .env("LC_ALL", "C")
+        .arg("-u")
+        .arg("-T")
+        .arg(&workspace.0)
+        .arg("--")
+        .arg(&paths)
+        .stdout(fs::File::create(&sorted)?)
+        .status()
+        .context("failed to run sort")?;
+    if !status.success() {
+        bail!("sort failed: {status}");
+    }
+    let merged = workspace.0.join("merged.db");
+    let status = Command::new(&cfg.tools.plocate_build)
+        .args(["-p", "-l", "0"])
+        .arg(&sorted)
+        .arg(&merged)
+        .status()
+        .context("failed to run plocate-build")?;
+    if !status.success() {
+        bail!("plocate-build failed: {status}");
+    }
+    fs::set_permissions(&merged, fs::metadata(&idx.database)?.permissions())?;
+    fs::File::open(&merged)?.sync_all()?;
+    fs::rename(&merged, &idx.database).context("failed to replace main database")?;
+    eprintln!(
+        "merged {} into {}",
+        folder.display(),
+        idx.database.display()
+    );
+    Ok(())
+}
+
+fn export_paths(
+    cfg: &Config,
+    database: &Path,
+    removed: Option<&Path>,
+    output: &mut impl Write,
+) -> Result<()> {
+    // plocate's -d list syntax requires escaping ':' and backslash, even for one DB.
+    let mut escaped = Vec::new();
+    for &byte in database.as_os_str().as_bytes() {
+        if matches!(byte, b':' | b'\\') {
+            escaped.push(b'\\');
+        }
+        escaped.push(byte);
+    }
+    let mut child = Command::new(&cfg.tools.plocate)
+        .env_remove("LOCATE_PATH")
+        .arg("-d")
+        .arg(OsString::from_vec(escaped))
+        .args(["-0", "--", "*"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stderr = child.stderr.take().context("missing plocate stderr")?;
+    let diagnostics =
+        thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::stderr().lock()));
+    let mut reader = BufReader::new(child.stdout.take().context("missing plocate stdout")?);
+    let result: Result<()> = (|| {
+        let mut path = Vec::new();
+        loop {
+            path.clear();
+            if reader.read_until(0, &mut path)? == 0 {
+                break;
+            }
+            path.pop();
+            let path_obj = Path::new(std::ffi::OsStr::from_bytes(&path));
+            if removed.is_some_and(|root| path_obj.starts_with(root)) {
+                continue;
+            }
+            if path.contains(&b'\n') {
+                bail!(
+                    "partial merge cannot import filenames containing newlines; use a full index update"
+                );
+            }
+            output.write_all(&path)?;
+            output.write_all(b"\n")?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        child.kill().ok();
+    }
+    drop(reader);
+    let status = child.wait()?;
+    let diagnostic_bytes = diagnostics
+        .join()
+        .map_err(|_| anyhow::anyhow!("diagnostic reader panicked"))??;
+    result?;
+    if !(status.success() || (status.code() == Some(1) && diagnostic_bytes == 0)) {
+        bail!("cannot export database {}: {status}", database.display());
     }
     Ok(())
 }
 
 fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
+    let _lock = lock_database(&idx.database)?;
     if !idx.root.is_dir() {
         bail!(
             "index root does not exist or is not a directory: {}",

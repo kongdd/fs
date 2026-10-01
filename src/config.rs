@@ -7,12 +7,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Config {
-    #[serde(default)]
     pub tools: Tools,
-    #[serde(default)]
-    pub filters: Filters,
     pub index: Vec<IndexConfig>,
 }
 
@@ -22,6 +19,10 @@ pub struct Tools {
     pub plocate: String,
     #[serde(default = "default_updatedb")]
     pub updatedb: String,
+    #[serde(default = "default_plocate_build")]
+    pub plocate_build: String,
+    #[serde(default = "default_sort")]
+    pub sort: String,
 }
 
 impl Default for Tools {
@@ -29,24 +30,50 @@ impl Default for Tools {
         Self {
             plocate: default_plocate(),
             updatedb: default_updatedb(),
+            plocate_build: default_plocate_build(),
+            sort: default_sort(),
         }
     }
 }
 
 fn default_plocate() -> String {
-    "plocate".into()
+    tool_path("plocate")
 }
 
 fn default_updatedb() -> String {
-    "updatedb".into()
+    tool_path("updatedb")
 }
 
-#[derive(Debug, Clone, Deserialize)]
+fn default_plocate_build() -> String {
+    tool_path("plocate-build")
+}
+
+fn default_sort() -> String {
+    tool_path("sort")
+}
+
+fn tool_path(name: &str) -> String {
+    if let Ok(executable) = env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        for directory in [
+            parent.join("tools/bin"),
+            parent.join("../lib/nasfind/tools/bin"),
+        ] {
+            let tool = directory.join(name);
+            if tool.is_file() {
+                return tool.to_string_lossy().into_owned();
+            }
+        }
+    }
+    name.into()
+}
+
+#[derive(Debug, Clone)]
 pub struct IndexConfig {
     pub name: String,
     pub root: PathBuf,
     pub database: PathBuf,
-    #[serde(flatten)]
     pub filters: Filters,
 }
 
@@ -58,6 +85,34 @@ pub struct Filters {
     pub exclude_paths: Vec<PathBuf>,
     #[serde(default)]
     pub exclude_extensions: Vec<String>,
+    #[serde(default)]
+    pub exclude_files: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    tools: Tools,
+    #[serde(default)]
+    filters: Filters,
+    index: Vec<RawIndex>,
+}
+
+#[derive(Deserialize)]
+struct RawIndex {
+    name: String,
+    root: PathBuf,
+    database: PathBuf,
+    #[serde(flatten)]
+    filters: LocalFilters,
+}
+
+#[derive(Default, Deserialize)]
+struct LocalFilters {
+    exclude_dirs: Option<Vec<String>>,
+    exclude_paths: Option<Vec<PathBuf>>,
+    exclude_extensions: Option<Vec<String>>,
+    exclude_files: Option<Vec<String>>,
 }
 
 impl Config {
@@ -79,18 +134,38 @@ impl Config {
     }
 
     fn parse(text: &str) -> Result<Self> {
-        let mut cfg: Self = toml::from_str(text)?;
-        for idx in &mut cfg.index {
-            idx.filters
-                .exclude_dirs
-                .extend(cfg.filters.exclude_dirs.iter().cloned());
-            idx.filters
-                .exclude_paths
-                .extend(cfg.filters.exclude_paths.iter().cloned());
-            idx.filters
-                .exclude_extensions
-                .extend(cfg.filters.exclude_extensions.iter().cloned());
-        }
+        let raw: RawConfig = toml::from_str(text)?;
+        let global = raw.filters;
+        let cfg = Self {
+            tools: raw.tools,
+            index: raw
+                .index
+                .into_iter()
+                .map(|idx| IndexConfig {
+                    name: idx.name,
+                    root: idx.root,
+                    database: idx.database,
+                    filters: Filters {
+                        exclude_dirs: idx
+                            .filters
+                            .exclude_dirs
+                            .unwrap_or_else(|| global.exclude_dirs.clone()),
+                        exclude_paths: idx
+                            .filters
+                            .exclude_paths
+                            .unwrap_or_else(|| global.exclude_paths.clone()),
+                        exclude_extensions: idx
+                            .filters
+                            .exclude_extensions
+                            .unwrap_or_else(|| global.exclude_extensions.clone()),
+                        exclude_files: idx
+                            .filters
+                            .exclude_files
+                            .unwrap_or_else(|| global.exclude_files.clone()),
+                    },
+                })
+                .collect(),
+        };
         cfg.validate()?;
         Ok(cfg)
     }
@@ -214,27 +289,33 @@ mod tests {
     }
 
     #[test]
-    fn combines_global_and_local_filters() {
+    fn local_rules_override_and_missing_rules_inherit() {
         let text = EXAMPLE_CONFIG.replace(
             "name = \"research\"",
-            "exclude_extensions = [\"local\"]\nname = \"research\"",
+            "exclude_extensions = [\"local\"]\nexclude_files = []\nname = \"research\"",
         );
         let cfg = Config::parse(&text).unwrap();
-        assert!(
-            cfg.index[0]
-                .filters
-                .exclude_extensions
-                .contains(&"local".into())
+        assert_eq!(cfg.index[0].filters.exclude_extensions, ["local"]);
+        assert!(cfg.index[0].filters.exclude_files.is_empty());
+        assert_eq!(
+            cfg.index[0].filters.exclude_dirs,
+            cfg.index[1].filters.exclude_dirs
         );
-        for idx in &cfg.index {
-            assert!(idx.filters.exclude_extensions.contains(&"tmp".into()));
-            assert!(idx.filters.exclude_dirs.contains(&"node_modules".into()));
-        }
+        assert_eq!(
+            cfg.index[0].filters.exclude_paths,
+            cfg.index[1].filters.exclude_paths
+        );
         assert!(
-            !cfg.index[1]
+            cfg.index[1]
                 .filters
                 .exclude_extensions
-                .contains(&"local".into())
+                .contains(&"tmp".into())
+        );
+        assert!(
+            cfg.index[1]
+                .filters
+                .exclude_files
+                .contains(&".DS_Store".into())
         );
     }
 

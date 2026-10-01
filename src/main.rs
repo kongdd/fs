@@ -43,6 +43,9 @@ enum Commands {
     Index {
         /// Index names. Omit to update all configured indexes.
         names: Vec<String>,
+        /// Scan only this folder and merge its paths into the containing DB. May be repeated.
+        #[arg(long = "folder", conflicts_with = "names")]
+        folders: Vec<PathBuf>,
         /// Disable per-entry progress tracking for maximum indexing throughput.
         #[arg(long)]
         no_progress: bool,
@@ -68,9 +71,13 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Init { path, force } => init_config(&path, force),
-        Commands::Index { names, no_progress } => {
+        Commands::Index {
+            names,
+            folders,
+            no_progress,
+        } => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
-            indexer::build_indexes(&cfg, &names, !no_progress)
+            indexer::build_indexes(&cfg, &names, &folders, !no_progress)
         }
         Commands::Search(options) => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
@@ -107,7 +114,7 @@ fn normalize_implicit_search(mut args: Vec<String>) -> Vec<String> {
 
     if pos < args.len() {
         let first = args[pos].as_str();
-        if !first.starts_with('-') && !COMMANDS.contains(&first) {
+        if !COMMANDS.contains(&first) {
             args.insert(pos, "search".into());
         }
     }
@@ -138,6 +145,8 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     println!("indexes: {}", cfg.index.len());
     check_command(&cfg.tools.plocate, "--version")?;
     check_command(&cfg.tools.updatedb, "--version")?;
+    check_command(&cfg.tools.plocate_build, "--version")?;
+    check_command(&cfg.tools.sort, "--version")?;
 
     let mut ok = true;
     for idx in &cfg.index {
@@ -217,5 +226,20 @@ mod tests {
         let args = normalize_implicit_search(args);
         assert_eq!(args[3], "search");
         assert_eq!(args[4], "soil");
+    }
+
+    #[test]
+    fn implicit_search_accepts_options() {
+        for options in [
+            vec!["-i", "soil"],
+            vec!["--json", "-d", "research", "soil"],
+            vec!["--", "--version"],
+        ] {
+            let mut args = vec!["nasfind".to_owned()];
+            args.extend(options.iter().map(|arg| (*arg).to_owned()));
+            let normalized = normalize_implicit_search(args);
+            assert_eq!(normalized[1], "search");
+            assert!(Cli::try_parse_from(normalized).is_ok());
+        }
     }
 }

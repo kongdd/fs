@@ -1,11 +1,21 @@
-[tools]
-plocate = "plocate"
-updatedb = "updatedb"
-
+# Tool paths are detected automatically; optional [tools] overrides are supported.
 [filters]
-exclude_dirs = [".git", "node_modules", "target", "@eaDir", "#recycle"]
-exclude_paths = []
-exclude_extensions = ["tmp", "part", "pyc"]
+# Installed environments, dependency trees, caches and NAS/system metadata.
+# Keep project directories and source files; add custom installation paths below.
+exclude_dirs = [
+  ".git", "node_modules", "target",
+  ".julia", ".conda", "anaconda3", "miniconda3", "miniforge3", "mambaforge",
+  ".venv", "venv", "site-packages", "__pycache__", ".tox", ".nox",
+  "renv", "site-library", "win-library", "x86_64-pc-linux-gnu-library", "R.framework",
+  ".cache", ".bun", ".npm", ".pnpm-store", ".node-gyp", ".cargo", ".rustup",
+  ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints",
+  "@eaDir", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"
+]
+# Relative paths apply under every index root; absolute paths affect that location only.
+exclude_paths = ["System Volume Information"]
+exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
+# Exact basenames, matched without ASCII case sensitivity.
+exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 
 [[index]]
 name = "research"

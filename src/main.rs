@@ -41,13 +41,15 @@ enum Commands {
 
     /// Build or update one or more plocate databases.
     Index {
+        #[command(subcommand)]
+        action: Option<IndexAction>,
         /// Index names. Omit to update all configured indexes.
         names: Vec<String>,
         /// Scan only this folder and merge its paths into the containing DB. May be repeated.
-        #[arg(long = "folder", conflicts_with = "names")]
+        #[arg(long = "folder", global = true, conflicts_with = "names")]
         folders: Vec<PathBuf>,
         /// Disable per-entry progress tracking for maximum indexing throughput.
-        #[arg(long)]
+        #[arg(long, global = true)]
         no_progress: bool,
     },
 
@@ -56,6 +58,14 @@ enum Commands {
 
     /// Check configuration and external dependencies.
     Doctor,
+}
+
+#[derive(Subcommand, Debug)]
+enum IndexAction {
+    /// Update existing databases and automatically initialize missing ones.
+    Update { names: Vec<String> },
+    /// Initialize missing databases only; leave existing databases unchanged.
+    Init { names: Vec<String> },
 }
 
 fn main() {
@@ -72,11 +82,35 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Init { path, force } => init_config(&path, force),
         Commands::Index {
+            action,
             names,
             folders,
             no_progress,
         } => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
+            if action.is_some() && !names.is_empty() {
+                bail!("put index names after update/init, not before it");
+            }
+            let names = match action {
+                Some(IndexAction::Update { names }) => names,
+                Some(IndexAction::Init { names }) => {
+                    if !folders.is_empty() {
+                        bail!("index init cannot be combined with --folder");
+                    }
+                    let missing: Vec<_> = cfg
+                        .select(&names)?
+                        .into_iter()
+                        .filter(|idx| !idx.database.is_file())
+                        .map(|idx| idx.name.clone())
+                        .collect();
+                    if missing.is_empty() {
+                        eprintln!("all selected databases already exist; use nasfind index update");
+                        return Ok(());
+                    }
+                    missing
+                }
+                None => names,
+            };
             indexer::build_indexes(&cfg, &names, &folders, !no_progress)
         }
         Commands::Search(options) => {
@@ -226,6 +260,34 @@ mod tests {
         let args = normalize_implicit_search(args);
         assert_eq!(args[3], "search");
         assert_eq!(args[4], "soil");
+    }
+
+    #[test]
+    fn index_actions_accept_shared_options() {
+        for args in [
+            vec!["nasfind", "index", "update", "research", "--no-progress"],
+            vec!["nasfind", "index", "--no-progress", "update", "research"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Commands::Index {
+                action: Some(IndexAction::Update { names }), no_progress: true, ..
+            } if names == ["research"]));
+        }
+        let cli = Cli::try_parse_from(["nasfind", "index", "init"]).unwrap();
+        assert!(matches!(cli.command, Commands::Index {
+            action: Some(IndexAction::Init { names }), ..
+        } if names.is_empty()));
+        assert!(
+            Cli::try_parse_from([
+                "nasfind",
+                "index",
+                "update",
+                "research",
+                "--folder",
+                "/research"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

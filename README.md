@@ -44,10 +44,14 @@ should follow [the NAS setup guide](docs/synology.md); no compilation is needed.
 Then edit `~/.config/nasfind/config.toml` and build the indexes:
 
 ```bash
-nasfind index
+nasfind index update
 ```
 
 ## Configuration
+
+`examples/config.example.toml` is the portable template used by `nasfind init`
+and release packages. `examples/config.toml` is the local NAS configuration;
+keep it for local indexing and directory counts.
 
 ```toml
 [filters]
@@ -62,8 +66,6 @@ exclude_dirs = [
   ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints",
   "@eaDir", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"
 ]
-# Relative paths apply under every index root; absolute paths affect that location only.
-exclude_paths = ["System Volume Information"]
 exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 # Exact basenames, matched without ASCII case sensitivity.
 exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
@@ -72,11 +74,14 @@ exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 name = "research"
 root = "/volume1/research"
 database = "/var/lib/nasfind/research.db"
+# Paths are specific to this index; relative paths use its root.
+exclude_paths = ["project/cache"]
 
 [[index]]
 name = "archive"
 root = "/volume2/archive"
 database = "/var/lib/nasfind/archive.db"
+exclude_paths = ["temporary"]
 ```
 
 Tool paths are detected beside the executable (`tools/bin`) or in the installation
@@ -90,8 +95,13 @@ empty list disables that type of exclusion for the index. Local lists replace,
 rather than extend, global lists. Relative excluded paths
 are resolved against each index root; absolute paths are used as written.
 
-`exclude_dirs` is passed to plocate's `PRUNENAMES`, so entries must be plain directory names without
-spaces or `/`. Use `exclude_paths` for exact paths (including paths containing spaces).
+Keep `exclude_paths` inside each `[[index]]`, since excluded locations differ by index.
+Global path defaults remain supported for compatibility.
+
+`exclude_dirs` matches directory basenames at any depth; entries cannot contain `/`.
+Names without whitespace use plocate's `PRUNENAMES`. Names containing whitespace
+(such as `System Volume Information`) require a preliminary directory scan and are
+passed as exact prune paths. Use `exclude_paths` for specific locations.
 
 The shared example rules skip Synology's `#recycle` and the listed recycle/trash
 directories at any depth during indexing. Add these rules to existing configs
@@ -116,17 +126,20 @@ unwanted files (`node_modules`, `.git`, caches), happen during indexing.
 ## Usage
 
 ```bash
-# Update every configured DB
-nasfind index
+# Update every configured DB; initialize new indexes automatically
+nasfind index update
 
 # Update selected DBs only
-nasfind index research archive
+nasfind index update research archive
+
+# Initialize missing DBs only; leave existing DBs unchanged
+nasfind index init
 
 # Scan only this folder and merge its paths into the main DB
 nasfind index --folder /volume1/research/project
 
 # Maximum indexing throughput, no entry counter
-nasfind index research --no-progress
+nasfind index update research --no-progress
 
 # Search every DB (implicit `search`)
 nasfind soil moisture
@@ -146,6 +159,16 @@ nasfind search --json soil
 # Verify config and dependencies
 nasfind doctor
 ```
+
+`nasfind index` remains a shorthand for `nasfind index update`. Both update existing
+databases and automatically initialize any newly configured indexes.
+
+Indexing shows an animated progress bar, entry rate and elapsed time. Updates estimate
+percentage and remaining time from the previous database's entry count; these are
+approximate and may change as files are added or removed. A first build has no known
+total, so it shows activity without inventing an ETA. The display stays active during
+I/O pauses; non-interactive logs are emitted periodically. `--no-progress` disables
+both verbose entry counting and progress estimation for maximum throughput.
 
 Multiple patterns are passed directly to plocate and therefore use AND semantics.
 
@@ -172,6 +195,25 @@ Text and `--null` output preserve filename bytes; use `--null` for names contain
 newlines. JSON is streamed as a compact array with bounded buffering. Since JSON
 requires Unicode, invalid UTF-8 filename bytes are replaced in JSON output.
 
+## Directory counts from configured databases
+
+```bash
+python3 scripts/dircount.py -n10
+# Restrict the ranking to a subtree or select a named index:
+python3 scripts/dircount.py -d research -n10 /volume1/research/project
+```
+
+The tool uses nasfind's normal config lookup; `--config` selects an explicit config.
+It queries the configured databases, applies query-time filters, and
+ranks folders by recursive indexed-entry count. It never traverses indexed directories
+or checks whether indexed paths still exist; filesystem access belongs to `nasfind index`.
+Results are streamed, and direct-parent counts are aggregated bottom-up instead
+of recounting every ancestor for every path. A subtree argument restricts the
+query itself; `Total` then reports only indexed paths beneath that subtree.
+Database records include directories, so the default column is `ENTRIES`, not
+an exact file count. Parent and child totals overlap. Common ancestors containing
+all results are omitted unless a subtree argument is supplied. Python 3.8+ is required.
+
 ## NAS benchmarks
 
 See [the NAS benchmark guide](docs/benchmark.md). Release ZIPs include
@@ -196,7 +238,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nasfind-update.timer
 ```
 
-The provided service expects `/etc/nasfind/config.toml`; copy and edit `examples/config.toml` first.
+The provided service expects `/etc/nasfind/config.toml`; copy and edit `examples/config.example.toml` first.
 The timer first runs five minutes after boot, then every two days (48 hours,
 with up to 30 seconds of randomized delay). It uses a monotonic interval;
 reboots restart the boot schedule. After replacing an installed timer, run

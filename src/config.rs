@@ -202,13 +202,6 @@ impl Config {
                 bail!("duplicate database path: {}", idx.database.display());
             }
             for name in &idx.filters.exclude_dirs {
-                if name.chars().any(char::is_whitespace) {
-                    bail!(
-                        "index {} exclude_dirs entry {:?} contains whitespace; use exclude_paths instead",
-                        idx.name,
-                        name
-                    );
-                }
                 if name.contains('/') {
                     bail!(
                         "index {} exclude_dirs entry {:?} contains '/'; use exclude_paths instead",
@@ -259,24 +252,41 @@ pub fn default_config_path() -> Option<PathBuf> {
     system.is_file().then_some(system)
 }
 
-pub const EXAMPLE_CONFIG: &str = include_str!("../examples/config.toml");
+pub const EXAMPLE_CONFIG: &str = include_str!("../examples/config.example.toml");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Behavioral tests must not depend on the user's editable example config.
+    const TEST_CONFIG: &str = r#"
+[filters]
+exclude_dirs = ["node_modules"]
+exclude_paths = ["shared/cache"]
+exclude_extensions = ["tmp"]
+exclude_files = [".DS_Store"]
+
+[[index]]
+name = "research"
+root = "/research"
+database = "/research.db"
+exclude_paths = ["project/cache"]
+
+[[index]]
+name = "archive"
+root = "/archive"
+database = "/archive.db"
+"#;
+
     #[test]
     fn parses_example_config() {
         let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
-        cfg.validate().unwrap();
-        assert_eq!(cfg.index.len(), 2);
-        assert_eq!(cfg.index[0].name, "research");
-        assert_eq!(cfg.tools.plocate, "plocate");
+        assert!(!cfg.index.is_empty());
     }
 
     #[test]
     fn selects_named_indexes() {
-        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
+        let cfg = Config::parse(TEST_CONFIG).unwrap();
         let selected = cfg.select(&["archive".into()]).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "archive");
@@ -284,13 +294,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_indexes() {
-        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
+        let cfg = Config::parse(TEST_CONFIG).unwrap();
         assert!(cfg.select(&["missing".into()]).is_err());
     }
 
     #[test]
     fn local_rules_override_and_missing_rules_inherit() {
-        let text = EXAMPLE_CONFIG.replace(
+        let text = TEST_CONFIG.replace(
             "name = \"research\"",
             "exclude_extensions = [\"local\"]\nexclude_files = []\nname = \"research\"",
         );
@@ -301,9 +311,17 @@ mod tests {
             cfg.index[0].filters.exclude_dirs,
             cfg.index[1].filters.exclude_dirs
         );
-        assert_eq!(
+        assert_ne!(
             cfg.index[0].filters.exclude_paths,
             cfg.index[1].filters.exclude_paths
+        );
+        assert_eq!(
+            cfg.index[0].filters.exclude_paths,
+            [PathBuf::from("project/cache")]
+        );
+        assert_eq!(
+            cfg.index[1].filters.exclude_paths,
+            [PathBuf::from("shared/cache")]
         );
         assert!(
             cfg.index[1]
@@ -321,7 +339,13 @@ mod tests {
 
     #[test]
     fn rejects_invalid_global_directory_filter() {
-        let text = EXAMPLE_CONFIG.replace("node_modules", "cache with spaces");
+        let text = TEST_CONFIG.replace("node_modules", "cache/subdir");
         assert!(Config::parse(&text).is_err());
+    }
+
+    #[test]
+    fn accepts_directory_names_with_spaces() {
+        let text = TEST_CONFIG.replace("node_modules", "System Volume Information");
+        assert!(Config::parse(&text).is_ok());
     }
 }

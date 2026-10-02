@@ -9,20 +9,46 @@ exclude_dirs = [
   "renv", "site-library", "win-library", "x86_64-pc-linux-gnu-library", "R.framework",
   ".cache", ".bun", ".npm", ".pnpm-store", ".node-gyp", ".cargo", ".rustup",
   ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints",
-  "@eaDir", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"
+  "@eaDir", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd",
+  "tiles",
+  "build", "dist", ".gradle",
+  "typst.ts", "orca", "dify", "moltbot-main", "qwen-code", "whitebox_next_gen",
+  "users", "ZWJTEST", "zouyuhe",
+  "Hydro-LSTM", "ET_GW_DATA", "DATABASE_WORLD_V3",
+  ".pi-subagents",
+  "typst-packages"
 ]
-# Relative paths apply under every index root; absolute paths affect that location only.
-exclude_paths = ["System Volume Information"]
 exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 # Exact basenames, matched without ASCII case sensitivity.
 exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 
 [[index]]
-name = "research"
-root = "/volume1/research"
-database = "/var/lib/nasfind/research.db"
+name = "github"
+root = "/volume1/CMIP6/GitHub"
+database = "/volume1/homes/kong/.local/var/nasfind/github.db"
+# Relative paths are resolved against this index root.
+exclude_paths = [
+  "kongdd/google-map-downloader/data",
+  "users"
+]
 
 [[index]]
-name = "archive"
-root = "/volume2/archive"
-database = "/var/lib/nasfind/archive.db"
+name = "cmip6"
+root = "/volume1/CMIP6"
+database = "/volume1/homes/kong/.local/var/nasfind/cmip6.db"
+exclude_paths = ["GitHub"]
+
+[[index]]
+name = "github_ssd"
+root = "/volume2/GitHub"
+database = "/volume1/homes/kong/.local/var/nasfind/github_ssd.db"
+
+[[index]]
+name = "cug-hydro"
+root = "/volume1/CUG-hydro"
+database = "/volume1/homes/kong/.local/var/nasfind/cug-hydro.db"
+
+[[index]]
+name = "researches"
+root = "/volume1/Researches"
+database = "/volume1/homes/kong/.local/var/nasfind/researches.db"

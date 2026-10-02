@@ -14,29 +14,32 @@ touch "$ROOT/archive/ignore.TMP"
 touch "$ROOT/research/private/local_visibility.txt"
 touch "$ROOT/archive/private/local_visibility.txt"
 touch "$ROOT/research/ignore.pyc"
+mkdir -p "$ROOT/research/nested/System Volume Information" "$ROOT/archive/System Volume Information"
+touch "$ROOT/research/nested/System Volume Information/hidden_soil.nc" "$ROOT/archive/System Volume Information/hidden_soil.nc"
 
 cat > "$ROOT/config.toml" <<EOF2
 [filters]
-exclude_dirs = ["node_modules", "#recycle"]
-exclude_paths = ["cache with spaces"]
+exclude_dirs = ["node_modules", "#recycle", "System Volume Information"]
 exclude_extensions = ["tmp"]
 
 [[index]]
 name = "research"
 root = "$ROOT/research"
 database = "$ROOT/research.db"
-exclude_dirs = ["node_modules", "#recycle", "private"]
+exclude_dirs = ["node_modules", "#recycle", "private", "System Volume Information"]
+exclude_paths = ["cache with spaces"]
 exclude_extensions = ["tmp", "pyc"]
 
 [[index]]
 name = "archive"
 root = "$ROOT/archive"
 database = "$ROOT/archive.db"
+exclude_paths = ["cache with spaces"]
 EOF2
 
 BIN=${1:-target/release/nasfind}
 "$BIN" --config "$ROOT/config.toml" doctor
-"$BIN" --config "$ROOT/config.toml" index --no-progress
+"$BIN" --config "$ROOT/config.toml" index update --no-progress
 
 out=$("$BIN" --config "$ROOT/config.toml" soil)
 grep -F "$ROOT/research/soil_moisture.nc" <<<"$out"
@@ -66,6 +69,62 @@ def search(*args):
     result = run("search", *args)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+# init leaves existing databases untouched; update also initializes new indexes.
+existing = {name: (base / (name + '.db')).read_bytes() for name in ['research', 'archive']}
+initialized = run('index', 'init', '--no-progress')
+assert initialized.returncode == 0, initialized.stderr
+assert b'already exist' in initialized.stderr
+assert all((base / (name + '.db')).read_bytes() == data for name, data in existing.items())
+assert run('index', 'init', 'missing').returncode != 0
+assert run('index', 'init', '--folder', str(base / 'research')).returncode != 0
+updated = run('index', 'update', 'research')
+assert updated.returncode == 0, updated.stderr
+assert b'[update]' in updated.stderr and b'estimated total' in updated.stderr
+
+# A TTY gets live percentage/ETA updates even between bursts of stdout.
+import pty, tempfile
+cache = pathlib.Path.home() / '.cache'
+cache.mkdir(exist_ok=True)
+with tempfile.TemporaryDirectory(prefix='nasfind-progress-', dir=cache) as temporary:
+    fixture = pathlib.Path(temporary)
+    locate = fixture / 'plocate'
+    locate.write_text('#!/usr/bin/env python3\nprint(100)\n')
+    locate.chmod(0o755)
+    scanner = fixture / 'updatedb'
+    scanner.write_text('#!/usr/bin/env python3\nimport time\nfor i in range(50): print("/data/file"+str(i), flush=True)\ntime.sleep(1)\nfor i in range(50,100): print("/data/file"+str(i), flush=True)\ntime.sleep(0.6)\nimport os\nos.close(1)\ntime.sleep(0.6)\n')
+    scanner.chmod(0o755)
+    database = fixture / 'progress.db'
+    database.touch()
+    progress_config = fixture / 'config.toml'
+    progress_config.write_text('[tools]\nplocate=' + json.dumps(str(locate)) + '\nupdatedb=' + json.dumps(str(scanner)) + '\n[[index]]\nname="progress"\nroot=' + json.dumps(str(fixture)) + '\ndatabase=' + json.dumps(str(database)) + '\n')
+    master, slave = pty.openpty()
+    try:
+        result = subprocess.run([binary, '--config', str(progress_config), 'index', 'update'], stdout=subprocess.PIPE, stderr=slave, timeout=10)
+        os.close(slave)
+        slave = None
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        display = b''.join(chunks)
+        assert result.returncode == 0, display
+        assert b'~50%' in display and b'ETA ~' in display, display
+        assert b'past estimate; ETA unknown' in display, display
+        assert b'finishing; ETA unknown' in display, display
+        assert b'done progress: 100 entries' in display, display
+        scanner.write_text('#!/usr/bin/env python3\nprint("/data/file", flush=True)\nraise SystemExit(3)\n')
+        failed = subprocess.run([binary, '--config', str(progress_config), 'index', 'update'], capture_output=True, timeout=10)
+        assert failed.returncode != 0 and b'updatedb failed' in failed.stderr, failed.stderr
+    finally:
+        os.close(master)
+        if slave is not None:
+            os.close(slave)
 
 assert json.loads(search("--json", "nothing_matches_123")) == []
 assert run("-i", "SOIL").stdout == search("-i", "SOIL")
@@ -112,6 +171,15 @@ assert result.returncode == 0, result.stderr
 assert b"indexing project:" in result.stderr and b"indexing research:" not in result.stderr
 assert (base / "project.db").is_file()
 assert (base / "research.db").read_bytes() == parent_before
+(base / 'project.db').unlink()
+initialized = subprocess.run([binary, '--config', str(nested_config), 'index', 'init', 'project'], capture_output=True, timeout=10)
+assert initialized.returncode == 0 and b'[init]' in initialized.stderr, initialized.stderr
+assert b'total unknown' in initialized.stderr
+assert (base / 'research.db').read_bytes() == parent_before
+(base / 'project.db').unlink()
+updated = subprocess.run([binary, '--config', str(nested_config), 'index', 'update', 'project', '--no-progress'], capture_output=True, timeout=10)
+assert updated.returncode == 0 and b'[init]' in updated.stderr, updated.stderr
+assert (base / 'project.db').is_file()
 
 # A partial update replaces only the selected subtree in the main DB.
 project = base / "research/project"
@@ -212,7 +280,7 @@ init = subprocess.run([binary, "init", str(default_config)], capture_output=True
 assert init.returncode == 0, init.stderr
 own = base / "personal"
 own.mkdir()
-for folder in [".julia", "miniconda3", ".venv", "renv", "node_modules", "target", ".cargo", ".rustup", ".bun", ".npm", ".pnpm-store", ".node-gyp", ".cache", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", "System Volume Information"]:
+for folder in [".julia", "miniconda3", ".venv", "renv", "node_modules", "target", ".cargo", ".rustup", ".bun", ".npm", ".pnpm-store", ".node-gyp", ".cache", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes"]:
     (own / folder).mkdir()
     (own / folder / "discard_package.nc").touch()
 for name in [".DS_Store", "Thumbs.db", "DESKTOP.INI", ".directory", "discard.tmp", "discard.rlib", "discard.rmeta"]:
@@ -250,6 +318,31 @@ local_config = base / "local-config.toml"
 local_config.write_text('[filters]\nexclude_extensions=["tmp"]\n[[index]]\nname="research"\nroot=' + json.dumps(root + '/research') + '\ndatabase=' + json.dumps(root + '/research.db') + '\nexclude_extensions=[]\n')
 local = subprocess.run([binary, "--config", str(local_config), "search", "-0", "ignore.tmp"], capture_output=True, timeout=10)
 assert local.returncode == 0 and local.stdout == (root + '/research/ignore.tmp').encode() + b'\0'
+
+# dircount reads DB records, including deleted paths, and escapes subtree globs.
+rank_root = base / r'archive/rank[*?]\back'
+(rank_root / 'left').mkdir(parents=True)
+(rank_root / 'right').mkdir()
+for name in ['left/a.nc', 'left/deleted.nc', 'left/ignored.tmp', 'right/c.nc']:
+    (rank_root / name).touch()
+assert run('index', 'archive', '--no-progress').returncode == 0
+(rank_root / 'left/deleted.nc').unlink()
+ranked = subprocess.run([sys.executable, 'scripts/dircount.py', '--nasfind', binary,
+                         '--config', config, '-d', 'archive', '-n3', str(rank_root)],
+                        capture_output=True, timeout=10)
+assert ranked.returncode == 0, ranked.stderr
+lines = ranked.stdout.decode().splitlines()[1:]
+assert [line.split(None, 1) for line in lines] == [
+    ['5', str(rank_root)], ['2', str(rank_root / 'left')], ['1', str(rank_root / 'right')]]
+assert b'Total: 5 unique indexed paths' in ranked.stderr
+# A standalone/package copy inherits nasfind's config lookup without --config.
+rank_script = base / 'dircount.py'
+shutil.copyfile('scripts/dircount.py', rank_script)
+inherited = subprocess.run([sys.executable, str(rank_script), '--nasfind', binary,
+                            '-d', 'archive', '-n3', str(rank_root)], capture_output=True,
+                           env={**os.environ, 'NASFIND_CONFIG': config}, timeout=10)
+assert inherited.returncode == 0, inherited.stderr
+assert inherited.stdout == ranked.stdout
 
 # A readable but corrupt DB must not look like an empty successful search.
 (base / "research.db").write_bytes(b"not a plocate database")

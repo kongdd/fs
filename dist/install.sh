@@ -53,8 +53,8 @@ if [ -d "$SCRIPT_DIR/tools" ]; then
 fi
 if [ -f "$SCRIPT_DIR/config.toml.example" ]; then
     install -m 0644 "$SCRIPT_DIR/config.toml.example" "$DATADIR/config.toml.example"
-elif [ -f "$SCRIPT_DIR/../examples/config.toml" ]; then
-    install -m 0644 "$SCRIPT_DIR/../examples/config.toml" "$DATADIR/config.toml.example"
+elif [ -f "$SCRIPT_DIR/../examples/config.example.toml" ]; then
+    install -m 0644 "$SCRIPT_DIR/../examples/config.example.toml" "$DATADIR/config.toml.example"
 fi
 
 echo "installed: $BINDIR/nasfind"

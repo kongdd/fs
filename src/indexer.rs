@@ -7,7 +7,11 @@ use std::{
         fs::{DirBuilderExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -198,13 +202,8 @@ fn merge_folder(
     Ok(())
 }
 
-fn export_paths(
-    cfg: &Config,
-    database: &Path,
-    removed: Option<&Path>,
-    output: &mut impl Write,
-) -> Result<()> {
-    // plocate's -d list syntax requires escaping ':' and backslash, even for one DB.
+fn database_arg(database: &Path) -> OsString {
+    // plocate's -d list syntax requires escaping ':' and backslash.
     let mut escaped = Vec::new();
     for &byte in database.as_os_str().as_bytes() {
         if matches!(byte, b':' | b'\\') {
@@ -212,10 +211,38 @@ fn export_paths(
         }
         escaped.push(byte);
     }
+    OsString::from_vec(escaped)
+}
+
+fn estimated_entries(cfg: &Config, database: &Path) -> Option<u64> {
+    let output = Command::new(&cfg.tools.plocate)
+        .env_remove("LOCATE_PATH")
+        .arg("-c")
+        .arg("-d")
+        .arg(database_arg(database))
+        .args(["--", "*"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|count| *count > 0)
+}
+
+fn export_paths(
+    cfg: &Config,
+    database: &Path,
+    removed: Option<&Path>,
+    output: &mut impl Write,
+) -> Result<()> {
     let mut child = Command::new(&cfg.tools.plocate)
         .env_remove("LOCATE_PATH")
         .arg("-d")
-        .arg(OsString::from_vec(escaped))
+        .arg(database_arg(database))
         .args(["-0", "--", "*"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -261,18 +288,84 @@ fn export_paths(
     Ok(())
 }
 
+// PRUNENAMES is whitespace-separated and cannot represent these names.
+// Discover their exact paths without descending into excluded directories.
+fn spaced_directory_paths(idx: &IndexConfig) -> Result<Vec<PathBuf>> {
+    if !idx
+        .filters
+        .exclude_dirs
+        .iter()
+        .any(|name| name.chars().any(char::is_whitespace))
+    {
+        return Ok(Vec::new());
+    }
+    let excluded_paths: Vec<_> = idx
+        .filters
+        .exclude_paths
+        .iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                idx.root.join(path)
+            }
+        })
+        .collect();
+    let mut pending = vec![idx.root.clone()];
+    let mut found = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if excluded_paths
+            .iter()
+            .any(|path| directory.starts_with(path))
+        {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot scan {}", directory.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            // Do not follow symlinks, just like updatedb.
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let basename = entry.file_name();
+            if let Some(name) = idx
+                .filters
+                .exclude_dirs
+                .iter()
+                .find(|name| basename == name.as_str())
+            {
+                if name.chars().any(char::is_whitespace) {
+                    found.push(entry.path());
+                }
+            } else {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
-    let _lock = lock_database(&idx.database)?;
     if !idx.root.is_dir() {
         bail!(
             "index root does not exist or is not a directory: {}",
             idx.root.display()
         );
     }
-    if let Some(parent) = idx.database.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create database directory {}", parent.display()))?;
-    }
+    let _lock = lock_database(&idx.database)?;
+    let start = Instant::now();
+    let existing = idx.database.is_file();
+    let expected = if progress && existing {
+        estimated_entries(cfg, &idx.database)
+    } else {
+        None
+    };
 
     let mut cmd = Command::new(&cfg.tools.updatedb);
     // Override system pruning defaults: they commonly exclude NAS filesystems.
@@ -284,7 +377,15 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         .arg("--prunepaths")
         .arg("")
         .arg("--prunenames")
-        .arg(idx.filters.exclude_dirs.join(" "))
+        .arg(
+            idx.filters
+                .exclude_dirs
+                .iter()
+                .filter(|name| !name.chars().any(char::is_whitespace))
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
         .arg("-l")
         .arg("0")
         .arg("-U")
@@ -301,6 +402,22 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         cmd.arg("--add-single-prunepath").arg(absolute);
     }
 
+    if progress
+        && idx
+            .filters
+            .exclude_dirs
+            .iter()
+            .any(|name| name.chars().any(char::is_whitespace))
+    {
+        eprintln!(
+            "{}: preparing whitespace directory exclusions (ETA unavailable)",
+            idx.name
+        );
+    }
+    for path in spaced_directory_paths(idx)? {
+        cmd.arg("--add-single-prunepath").arg(path);
+    }
+
     if progress {
         cmd.arg("-v").stdout(Stdio::piped());
     } else {
@@ -309,58 +426,34 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
     cmd.stderr(Stdio::inherit());
 
     eprintln!(
-        "indexing {}: {} -> {}",
+        "indexing {}: {} -> {} [{}]",
         idx.name,
         idx.root.display(),
-        idx.database.display()
+        idx.database.display(),
+        if existing { "update" } else { "init" }
     );
+    if progress {
+        match expected {
+            Some(total) => eprintln!(
+                "{}: estimated total ~{total} entries from previous DB",
+                idx.name
+            ),
+            None => eprintln!(
+                "{}: total unknown; showing activity without a completion estimate",
+                idx.name
+            ),
+        }
+    }
 
-    let start = Instant::now();
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to start {}", cfg.tools.updatedb))?;
 
-    let mut count = 0_u64;
-    if progress {
-        let stdout = child
-            .stdout
-            .take()
-            .context("updatedb stdout was not captured")?;
-        let mut reader = BufReader::new(stdout);
-        let mut current = Vec::new();
-        let terminal = std::io::stderr().is_terminal();
-        let mut last_report = Instant::now();
-
-        loop {
-            current.clear();
-            if reader
-                .read_until(b'\n', &mut current)
-                .context("failed to read updatedb progress")?
-                == 0
-            {
-                break;
-            }
-            count += 1;
-            if (terminal && last_report.elapsed() >= Duration::from_millis(250))
-                || (!terminal && count.is_multiple_of(100_000))
-            {
-                report_progress(
-                    &idx.name,
-                    count,
-                    start.elapsed(),
-                    String::from_utf8_lossy(&current).trim_end(),
-                    terminal,
-                )?;
-                last_report = Instant::now();
-            }
-        }
-        if terminal {
-            eprint!("\r\x1b[2K");
-            std::io::stderr().flush().ok();
-        }
-    }
-
-    let status = child.wait().context("failed waiting for updatedb")?;
+    let (status, count) = if progress {
+        wait_with_progress(&mut child, &idx.name, expected, start)?
+    } else {
+        (child.wait().context("failed waiting for updatedb")?, 0)
+    };
     if !status.success() {
         bail!(
             "updatedb failed for index {} with status {}",
@@ -389,43 +482,128 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
     Ok(())
 }
 
-fn report_progress(
+fn wait_with_progress(
+    child: &mut Child,
     name: &str,
-    count: u64,
-    elapsed: Duration,
-    current: &str,
-    terminal: bool,
-) -> Result<()> {
-    let rate = if elapsed.as_secs_f64() > 0.0 {
-        count as f64 / elapsed.as_secs_f64()
+    expected: Option<u64>,
+    start: Instant,
+) -> Result<(ExitStatus, u64)> {
+    let stdout = child
+        .stdout
+        .take()
+        .context("updatedb stdout was not captured")?;
+    let processed = Arc::new(AtomicU64::new(0));
+    let reader_count = Arc::clone(&processed);
+    let reader = thread::spawn(move || -> std::io::Result<u64> {
+        let mut input = BufReader::new(stdout);
+        let mut line = Vec::new();
+        let mut count = 0;
+        loop {
+            line.clear();
+            if input.read_until(b'\n', &mut line)? == 0 {
+                return Ok(count);
+            }
+            count += 1;
+            reader_count.store(count, Ordering::Relaxed);
+        }
+    });
+    let terminal = std::io::stderr().is_terminal();
+    let interval = if terminal {
+        Duration::from_millis(250)
     } else {
-        0.0
+        Duration::from_secs(5)
     };
-    let short = truncate_left(current, 72);
-    if terminal {
-        eprint!(
-            "\r\x1b[2K{name}: {count} entries | {rate:.0}/s | {:.1}s | {short}",
-            elapsed.as_secs_f64()
-        );
-        std::io::stderr()
-            .flush()
-            .context("failed to flush progress")?;
-    } else if count.is_multiple_of(100_000) {
-        eprintln!(
-            "{name}: {count} entries | {rate:.0}/s | {:.1}s | {short}",
-            elapsed.as_secs_f64()
-        );
+    let result = (|| -> Result<ExitStatus> {
+        let mut last_report = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if last_report.elapsed() >= interval {
+                let status = progress_status(
+                    processed.load(Ordering::Relaxed),
+                    start.elapsed(),
+                    expected,
+                    reader.is_finished(),
+                );
+                if terminal {
+                    write!(std::io::stderr(), "\r\x1b[2K{name}: {status}")
+                        .context("failed to write progress")?;
+                    std::io::stderr()
+                        .flush()
+                        .context("failed to flush progress")?;
+                } else {
+                    writeln!(std::io::stderr(), "{name}: {status}")
+                        .context("failed to write progress")?;
+                }
+                last_report = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    })();
+    if result.is_err() {
+        child.kill().ok();
+        child.wait().ok();
     }
-    Ok(())
+    if terminal {
+        write!(std::io::stderr(), "\r\x1b[2K").ok();
+        std::io::stderr().flush().ok();
+    }
+    let count = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("progress reader panicked"))?
+        .context("failed to read updatedb progress")?;
+    Ok((result?, count))
 }
 
-fn truncate_left(s: &str, max_chars: usize) -> String {
-    let len = s.chars().count();
-    if len <= max_chars {
-        return s.to_owned();
-    }
-    let tail: String = s.chars().skip(len - max_chars + 1).collect();
-    format!("…{tail}")
+fn progress_status(
+    count: u64,
+    elapsed: Duration,
+    expected: Option<u64>,
+    finalizing: bool,
+) -> String {
+    let rate = count as f64 / elapsed.as_secs_f64().max(0.001);
+    let (bar, estimate) = match expected.filter(|total| *total > 0) {
+        Some(total) => {
+            // Historical totals are estimates, not a promise of exact completion.
+            let fraction = (count as f64 / total as f64).min(0.99);
+            let filled = (fraction * 20.0) as usize;
+            let bar = format!(
+                "[{}{}] ~{:.0}%",
+                "=".repeat(filled),
+                " ".repeat(20 - filled),
+                fraction * 100.0
+            );
+            let estimate = if finalizing {
+                "finishing; ETA unknown".into()
+            } else if count >= total {
+                "past estimate; ETA unknown".into()
+            } else if count == 0 {
+                "ETA estimating".into()
+            } else {
+                let remaining = ((total - count) as f64 / rate).ceil() as u64;
+                format!("ETA ~{}m{:02}s", remaining / 60, remaining % 60)
+            };
+            (bar, estimate)
+        }
+        None => {
+            let position = (elapsed.as_millis() / 250 % 20) as usize;
+            let bar = format!("[{}>{}]", " ".repeat(position), " ".repeat(19 - position));
+            (
+                bar,
+                if finalizing {
+                    "finishing; ETA unknown"
+                } else {
+                    "total unknown; ETA unavailable"
+                }
+                .into(),
+            )
+        }
+    };
+    format!(
+        "{bar} | {count} entries | {rate:.0}/s | elapsed {:.1}s | {estimate}",
+        elapsed.as_secs_f64()
+    )
 }
 
 #[cfg(test)]
@@ -433,10 +611,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncates_long_paths() {
-        let s = "/a/very/long/path/to/something/file.txt";
-        let out = truncate_left(s, 12);
-        assert!(out.starts_with('…'));
-        assert!(out.ends_with("file.txt"));
+    fn discovers_spaced_names_at_any_depth_without_following_excluded_trees() {
+        let workspace = Workspace::new(&std::env::temp_dir().join("nasfind-test.db")).unwrap();
+        let root = &workspace.0;
+        for path in [
+            "nested/System Volume Information",
+            "System Volume Information/child/System Volume Information",
+            "node_modules/System Volume Information",
+            "cache/System Volume Information",
+            "System",
+            "Volume",
+        ] {
+            fs::create_dir_all(root.join(path)).unwrap();
+        }
+        std::os::unix::fs::symlink(root, root.join("loop")).unwrap();
+        let idx = IndexConfig {
+            name: "test".into(),
+            root: root.clone(),
+            database: root.join("test.db"),
+            filters: crate::config::Filters {
+                exclude_dirs: vec!["node_modules".into(), "System Volume Information".into()],
+                exclude_paths: vec!["cache".into()],
+                ..Default::default()
+            },
+        };
+        let mut paths = spaced_directory_paths(&idx).unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                root.join("System Volume Information"),
+                root.join("nested/System Volume Information")
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_estimates_remaining_time_from_previous_count() {
+        let status = progress_status(50, Duration::from_secs(10), Some(100), false);
+        assert!(status.contains("~50%"));
+        assert!(status.contains("ETA ~0m10s"));
+    }
+
+    #[test]
+    fn progress_never_claims_completion_from_an_estimate() {
+        let status = progress_status(150, Duration::from_secs(10), Some(100), false);
+        assert!(status.contains("~99%"));
+        assert!(status.contains("past estimate; ETA unknown"));
+        let first_run = progress_status(0, Duration::ZERO, None, false);
+        assert!(!first_run.contains('%'));
+        assert!(first_run.contains("ETA unavailable"));
+        let finalizing = progress_status(50, Duration::from_secs(10), Some(100), true);
+        assert!(finalizing.contains("finishing; ETA unknown"));
+    }
+
+    #[test]
+    fn escapes_database_list_separators() {
+        let escaped = database_arg(Path::new(r"/tmp/a:b\c.db"));
+        assert_eq!(escaped.as_bytes(), br"/tmp/a\:b\\c.db");
     }
 }

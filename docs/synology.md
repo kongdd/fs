@@ -56,11 +56,13 @@ database = "/volume1/nasfind-db/research.db"
 ./nasfind --config ./config.toml doctor
 ./nasfind --config ./config.toml index research --no-progress
 ./nasfind --config ./config.toml -i -l 50 soil
+./nasfind --config ./config.toml stats -d research -n10
 ./nasfind --config ./config.toml index --folder /volume1/research/project --no-progress
 ```
 
 建议将 DB 放在扫描根目录之外；如需放在里面，应在 `exclude_paths` 中排除其目录。
 初次索引需要遍历文件名；局部合并也需要额外磁盘空间与本地主 DB 重建。
+目录统计统一使用 `nasfind stats`，不再提供旧版 `dircount` 脚本，也不需要 Python。
 
 ## 安装到 PATH（可选）
 

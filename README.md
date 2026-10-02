@@ -1,261 +1,68 @@
 # nasfind
 
-`nasfind` is a deliberately small Rust wrapper around **plocate** for fast NAS file-name search.
-It does not reimplement a search engine. `updatedb` builds compact trigram/posting-list databases and
-`plocate` performs the queries; `nasfind` adds multiple named databases, per-index exclusions, progress,
-and a cleaner CLI.
+NAS 文件名搜索工具，基于 **plocate**。支持多个索引、目录排除和更新进度；`nasfind stats` 可快速查看哪些目录包含最多的索引条目。
 
-## Features
+## 安装与配置（只需一次）
 
-- Multiple independent databases (`research`, `data`, `archive`, ...)
-- Search all databases or selected databases
-- Directory exclusion using plocate `PRUNENAMES` / `PRUNEPATHS`
-- File-extension exclusion as a cheap result filter
-- `updatedb -v` based indexing progress (entries, rate, elapsed time, current path)
-- Unambiguous NUL-safe communication with plocate
-- JSON output
-- Implicit search: `nasfind soil moisture`
-- No daemon and no custom database format
+下载并解压 [Releases](https://github.com/kongdd/nasfind/releases) 中的 Linux 发布包，需要安装 plocate，日常搜索和统计不依赖 Python。群晖用户参考[安装说明](docs/synology.md)。
 
-## Dependency
-
-Linux with `plocate` installed. On Debian/Ubuntu:
+在解压目录中安装到用户目录，无需修改系统目录：
 
 ```bash
-sudo apt install plocate
+PREFIX="$HOME/.local" DATADIR="$HOME/.config/nasfind" ./install.sh
 ```
 
-`nasfind` deliberately treats plocate as a system dependency rather than vendoring it.
-
-## Install
-
-From a release ZIP:
+`~/.bashrc` 中配置命令路径和共用配置：
 
 ```bash
-unzip nasfind-*.zip
-cd nasfind-*
-sudo ./install.sh
-nasfind init
+# 直接使用 nasfind 命令
+export PATH="$HOME/.local/bin:$PATH"
+# 共用默认配置，不必每次输入 --config
+export NASFIND_CONFIG="$HOME/.config/nasfind/config.toml"
 ```
 
-Release binaries are statically linked for x86_64 and aarch64. Synology users
-should follow [the NAS setup guide](docs/synology.md); no compilation is needed.
+首次使用执行 `nasfind init`，然后编辑 `~/.config/nasfind/config.toml`，设置要索引的目录及数据库位置。数据库应放在扫描目录之外。已有配置不必重新初始化。
 
-Then edit `~/.config/nasfind/config.toml` and build the indexes:
+- `examples/config.example.toml`：通用配置模板。
+- `examples/config.toml`：保留的本地 NAS 配置。
+- 不需要搜索的具体路径写在对应的 `[[index]]` 的 `exclude_paths` 中。
+
+配置好后，下面的命令都不需要传配置文件。
+
+## 日常使用
 
 ```bash
-nasfind index update
+nasfind index update              # 更新所有索引，新索引自动初始化
+nasfind index update research     # 只更新指定索引
+nasfind soil moisture             # 搜索文件名，同时匹配两个关键词
+nasfind -d research soil          # 只搜索指定索引
+nasfind -i -l 20 ERA5             # 忽略大小写，最多返回 20 条
+nasfind doctor                   # 检查配置和依赖
 ```
 
-## Configuration
+更新时在同一行原地刷新进度条、数字、速度和耗时，不逐次新增行；首次扫描用 spinner 表示活动。非终端输出不打印中间进度，只保留开始、完成等日志。预计剩余时间参考旧数据库的条目数，仅为估算；首次建立索引没有已知总量，不显示虚假的完成时间。终端中重要状态带颜色（青色：进行中，绿色：完成，黄色：提示，红色：错误）；重定向输出、设置 `NO_COLOR` 或 `TERM=dumb` 时不着色。加上 `--no-progress` 可关闭进度显示。
 
-`examples/config.example.toml` is the portable template used by `nasfind init`
-and release packages. `examples/config.toml` is the local NAS configuration;
-keep it for local indexing and directory counts.
+## 目录统计
 
-```toml
-[filters]
-# Installed environments, dependency trees, caches and NAS/system metadata.
-# Keep project directories and source files; add custom installation paths below.
-exclude_dirs = [
-  ".git", "node_modules", "target",
-  ".julia", ".conda", "anaconda3", "miniconda3", "miniforge3", "mambaforge",
-  ".venv", "venv", "site-packages", "__pycache__", ".tox", ".nox",
-  "renv", "site-library", "win-library", "x86_64-pc-linux-gnu-library", "R.framework",
-  ".cache", ".bun", ".npm", ".pnpm-store", ".node-gyp", ".cargo", ".rustup",
-  ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints",
-  "@eaDir", "#recycle", "$RECYCLE.BIN", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"
-]
-exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
-# Exact basenames, matched without ASCII case sensitivity.
-exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
-
-[[index]]
-name = "research"
-root = "/volume1/research"
-database = "/var/lib/nasfind/research.db"
-# Paths are specific to this index; relative paths use its root.
-exclude_paths = ["project/cache"]
-
-[[index]]
-name = "archive"
-root = "/volume2/archive"
-database = "/var/lib/nasfind/archive.db"
-exclude_paths = ["temporary"]
-```
-
-Tool paths are detected beside the executable (`tools/bin`) or in the installation
-prefix (`lib/nasfind/tools/bin`), falling back to commands on PATH. Optional `[tools]`
-keys `plocate`, `updatedb`, `plocate_build` and `sort` override detection.
-
-Rules in `[filters]` are the defaults for every database. Each `[[index]]` may
-replace individual `exclude_dirs`, `exclude_paths`, `exclude_extensions`, or
-`exclude_files` lists. An omitted list inherits the global list; an explicit
-empty list disables that type of exclusion for the index. Local lists replace,
-rather than extend, global lists. Relative excluded paths
-are resolved against each index root; absolute paths are used as written.
-
-Keep `exclude_paths` inside each `[[index]]`, since excluded locations differ by index.
-Global path defaults remain supported for compatibility.
-
-`exclude_dirs` matches directory basenames at any depth; entries cannot contain `/`.
-Names without whitespace use plocate's `PRUNENAMES`. Names containing whitespace
-(such as `System Volume Information`) require a preliminary directory scan and are
-passed as exact prune paths. Use `exclude_paths` for specific locations.
-
-The shared example rules skip Synology's `#recycle` and the listed recycle/trash
-directories at any depth during indexing. Add these rules to existing configs
-and run `nasfind index` again to remove previously indexed recycle-bin entries.
-
-`exclude_files` excludes exact basenames (ASCII case-insensitive), including hidden
-files such as `.DS_Store`. It is applied at query time, like extension exclusions.
-The example skips common language environments, dependencies, caches and system
-metadata. It keeps `.py`, `.jl`, `.R`, `.rs`, datasets and documents. Custom installation
-directories need explicit exclusions. Review any personal work stored inside an
-excluded environment directory, such as `.julia/dev`, before using the defaults.
-
-Rust's default `target` directory (including debug/release, dependencies and
-incremental caches) is excluded during indexing. Loose `.rlib` and `.rmeta` files
-are filtered from results. If Cargo uses a custom `CARGO_TARGET_DIR`, add that
-location to `exclude_paths`; source files and Cargo manifests remain searchable.
-
-`exclude_extensions` is intentionally applied at query time. This keeps the implementation small and
-lets `updatedb` remain completely stock. Directory exclusions, which usually remove the bulk of
-unwanted files (`node_modules`, `.git`, caches), happen during indexing.
-
-## Usage
+目录统计统一使用 `nasfind stats`，不再提供 `dircount.py` 或 `dircount.sh`。旧版安装遗留的 `dircount` 命令可手动删除。
 
 ```bash
-# Update every configured DB; initialize new indexes automatically
-nasfind index update
-
-# Update selected DBs only
-nasfind index update research archive
-
-# Initialize missing DBs only; leave existing DBs unchanged
-nasfind index init
-
-# Scan only this folder and merge its paths into the main DB
-nasfind index --folder /volume1/research/project
-
-# Maximum indexing throughput, no entry counter
-nasfind index update research --no-progress
-
-# Search every DB (implicit `search`)
-nasfind soil moisture
-
-# Explicit search
-nasfind search soil moisture
-
-# Search only selected DBs
-nasfind search -d research -d archive Richards
-
-# Case-insensitive, basename-only, limit 50
-nasfind search -i -b -l 50 ERA5
-
-# JSON
-nasfind search --json soil
-
-# Verify config and dependencies
-nasfind doctor
+nasfind stats -n10                    # 查看条目最多的前 10 个目录
+nasfind stats -d research -n20         # 只统计指定索引
+nasfind stats /volume1/research/project  # 只统计某个子目录
+nasfind stats --recursive false       # 只统计直接子项
 ```
 
-`nasfind index` remains a shorthand for `nasfind index update`. Both update existing
-databases and automatically initialize any newly configured indexes.
+统计**只查询数据库，不遍历索引目录**。条目包含文件和目录，默认递归统计（`--recursive true`）；`--recursive false` 只统计直接子项，多索引重复路径会去重。
 
-Indexing shows an animated progress bar, entry rate and elapsed time. Updates estimate
-percentage and remaining time from the previous database's entry count; these are
-approximate and may change as files are added or removed. A first build has no known
-total, so it shows activity without inventing an ETA. The display stays active during
-I/O pauses; non-interactive logs are emitted periodically. `--no-progress` disables
-both verbose entry counting and progress estimation for maximum throughput.
+`index update` 自动维护 `stats.db`，同时保存两种计数，让日常统计直接查询缓存。缓存位于首个索引数据库的同目录；首次使用或源数据库、配置变化时会自动重建。文件变化后，先更新索引再统计。
 
-Multiple patterns are passed directly to plocate and therefore use AND semantics.
+## 更多说明
 
-`index --folder PATH` scans only the specified directory with stock `updatedb`,
-then replaces that subtree's old paths in the containing DB using `plocate-build`.
-Deleted and renamed files disappear; other folders keep their existing records.
-Absolute and relative paths are supported. The most specific configured root owns
-nested folders. Repeat `--folder` for multiple folders; it cannot be combined with
-index names. A folder equal to an index root uses a normal `updatedb` update.
+- 所有命令的详细参数：`nasfind --help`、`nasfind index --help`、`nasfind stats --help`。
+- [群晖安装](docs/synology.md) · [性能测试](docs/benchmark.md)
+- 开发检查：`make check`；端到端测试：`make e2e`。Rust 单元测试位于 `tests/unit/`。
 
-Build the main DB first. Folders outside configured roots or excluded by directory/
-path rules are rejected. Merging reads and rebuilds the entire main DB locally,
-but does not scan other NAS directories. It requires `plocate-build` (included in
-plocate) and GNU `sort`. Temporary files stay beside the DB; allow space for the
-path lists and replacement DB. Writers take an OS lock and the main DB is replaced
-atomically only after the merge succeeds.
+## 许可证
 
-The merged DB contains the filename index but loses `updatedb`'s directory reuse
-metadata, so the next full update must reread directories. Plaintext import cannot
-represent filenames containing newlines: partial updates reject those names without
-replacing the old DB; normal full updates still support them.
-
-Text and `--null` output preserve filename bytes; use `--null` for names containing
-newlines. JSON is streamed as a compact array with bounded buffering. Since JSON
-requires Unicode, invalid UTF-8 filename bytes are replaced in JSON output.
-
-## Directory counts from configured databases
-
-```bash
-python3 scripts/dircount.py -n10
-# Restrict the ranking to a subtree or select a named index:
-python3 scripts/dircount.py -d research -n10 /volume1/research/project
-```
-
-The tool uses nasfind's normal config lookup; `--config` selects an explicit config.
-It queries the configured databases, applies query-time filters, and
-ranks folders by recursive indexed-entry count. It never traverses indexed directories
-or checks whether indexed paths still exist; filesystem access belongs to `nasfind index`.
-Results are streamed, and direct-parent counts are aggregated bottom-up instead
-of recounting every ancestor for every path. A subtree argument restricts the
-query itself; `Total` then reports only indexed paths beneath that subtree.
-Database records include directories, so the default column is `ENTRIES`, not
-an exact file count. Parent and child totals overlap. Common ancestors containing
-all results are omitted unless a subtree argument is supplied. Python 3.8+ is required.
-
-## NAS benchmarks
-
-See [the NAS benchmark guide](docs/benchmark.md). Release ZIPs include
-`benchmark.py`, `BENCHMARK.md`, `setup-tools.py` and `SYNOLOGY.md`.
-
-## Why this design?
-
-The goal is minimum custom code and maximum reuse of a mature high-performance index. `plocate` uses
-an inverted index over trigrams and is designed for very large filename databases. `updatedb` can
-reuse information from an existing database to avoid rereading unchanged directories.
-
-`nasfind` only provides orchestration and policy around those tools.
-
-## Scheduling
-
-Examples are included in `dist/`:
-
-```bash
-sudo cp dist/nasfind-update.service /etc/systemd/system/
-sudo cp dist/nasfind-update.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now nasfind-update.timer
-```
-
-The provided service expects `/etc/nasfind/config.toml`; copy and edit `examples/config.example.toml` first.
-The timer first runs five minutes after boot, then every two days (48 hours,
-with up to 30 seconds of randomized delay). It uses a monotonic interval;
-reboots restart the boot schedule. After replacing an installed timer, run
-`sudo systemctl daemon-reload` and `sudo systemctl restart nasfind-update.timer`.
-
-## Development checks
-
-```bash
-make check  # formatting, Clippy and unit tests
-make e2e    # release build and real plocate indexing/search tests
-```
-
-The end-to-end script requires plocate and Python 3, uses a temporary directory,
-and cleans it up automatically.
-CI runs the same script. Indexing uses the configured exclusions, overriding
-system `updatedb` pruning defaults that may otherwise skip NAS filesystems.
-
-## License
-
-MIT. `plocate` is a separate external dependency and keeps its own license.
+MIT。plocate 为独立依赖，遵循其自身许可证。

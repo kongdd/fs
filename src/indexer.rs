@@ -18,7 +18,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{Config, IndexConfig};
+use crate::{
+    config::{Config, IndexConfig},
+    ui::{self, Tone},
+};
 
 pub fn build_indexes(
     cfg: &Config,
@@ -194,10 +197,13 @@ fn merge_folder(
     fs::set_permissions(&merged, fs::metadata(&idx.database)?.permissions())?;
     fs::File::open(&merged)?.sync_all()?;
     fs::rename(&merged, &idx.database).context("failed to replace main database")?;
-    eprintln!(
-        "merged {} into {}",
-        folder.display(),
-        idx.database.display()
+    ui::log(
+        Tone::Success,
+        format_args!(
+            "merged {} into {}",
+            folder.display(),
+            idx.database.display()
+        ),
     );
     Ok(())
 }
@@ -409,9 +415,12 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
             .iter()
             .any(|name| name.chars().any(char::is_whitespace))
     {
-        eprintln!(
-            "{}: preparing whitespace directory exclusions (ETA unavailable)",
-            idx.name
+        ui::log(
+            Tone::Warning,
+            format_args!(
+                "{}: preparing whitespace directory exclusions (ETA unavailable)",
+                idx.name
+            ),
         );
     }
     for path in spaced_directory_paths(idx)? {
@@ -425,25 +434,22 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
     }
     cmd.stderr(Stdio::inherit());
 
-    eprintln!(
-        "indexing {}: {} -> {} [{}]",
-        idx.name,
-        idx.root.display(),
-        idx.database.display(),
-        if existing { "update" } else { "init" }
+    let estimate = match (progress, expected) {
+        (true, Some(total)) => format!("; estimated total ~{total}"),
+        (true, None) => "; total unknown".into(),
+        (false, _) => String::new(),
+    };
+    ui::log(
+        Tone::Info,
+        format_args!(
+            "indexing {}: {} -> {} [{}]{}",
+            idx.name,
+            idx.root.display(),
+            idx.database.display(),
+            if existing { "update" } else { "init" },
+            estimate
+        ),
     );
-    if progress {
-        match expected {
-            Some(total) => eprintln!(
-                "{}: estimated total ~{total} entries from previous DB",
-                idx.name
-            ),
-            None => eprintln!(
-                "{}: total unknown; showing activity without a completion estimate",
-                idx.name
-            ),
-        }
-    }
 
     let mut child = cmd
         .spawn()
@@ -469,15 +475,21 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         } else {
             0.0
         };
-        eprintln!(
-            "done {}: {} entries in {:.1}s ({:.0}/s)",
-            idx.name,
-            count,
-            elapsed.as_secs_f64(),
-            rate
+        ui::log(
+            Tone::Success,
+            format_args!(
+                "done {}: {} entries in {:.1}s ({:.0}/s)",
+                idx.name,
+                count,
+                elapsed.as_secs_f64(),
+                rate
+            ),
         );
     } else {
-        eprintln!("done {} in {:.1}s", idx.name, elapsed.as_secs_f64());
+        ui::log(
+            Tone::Success,
+            format_args!("done {} in {:.1}s", idx.name, elapsed.as_secs_f64()),
+        );
     }
     Ok(())
 }
@@ -508,34 +520,41 @@ fn wait_with_progress(
         }
     });
     let terminal = std::io::stderr().is_terminal();
-    let interval = if terminal {
-        Duration::from_millis(250)
-    } else {
-        Duration::from_secs(5)
-    };
+    let interval = Duration::from_millis(250);
     let result = (|| -> Result<ExitStatus> {
         let mut last_report = Instant::now();
         loop {
             if let Some(status) = child.try_wait()? {
                 return Ok(status);
             }
-            if last_report.elapsed() >= interval {
+            // Only interactive terminals get live updates. Emitting periodic
+            // snapshots to a pipe/log creates an ever-growing wall of lines.
+            if terminal && last_report.elapsed() >= interval {
                 let status = progress_status(
                     processed.load(Ordering::Relaxed),
                     start.elapsed(),
                     expected,
                     reader.is_finished(),
                 );
-                if terminal {
-                    write!(std::io::stderr(), "\r\x1b[2K{name}: {status}")
-                        .context("failed to write progress")?;
-                    std::io::stderr()
-                        .flush()
-                        .context("failed to flush progress")?;
-                } else {
-                    writeln!(std::io::stderr(), "{name}: {status}")
-                        .context("failed to write progress")?;
-                }
+                let color = ui::stderr_color();
+                let name = ui::paint(name, Tone::Info, color);
+                let status = ui::paint(
+                    &status,
+                    if reader.is_finished()
+                        || expected.is_some_and(|total| processed.load(Ordering::Relaxed) >= total)
+                    {
+                        Tone::Warning
+                    } else {
+                        Tone::Info
+                    },
+                    color,
+                );
+                // Carriage return + erase, never a newline: replace the same row.
+                write!(std::io::stderr(), "\r\x1b[2K{name}: {status}")
+                    .context("failed to write progress")?;
+                std::io::stderr()
+                    .flush()
+                    .context("failed to flush progress")?;
                 last_report = Instant::now();
             }
             thread::sleep(Duration::from_millis(100));
@@ -567,11 +586,11 @@ fn progress_status(
         Some(total) => {
             // Historical totals are estimates, not a promise of exact completion.
             let fraction = (count as f64 / total as f64).min(0.99);
-            let filled = (fraction * 20.0) as usize;
+            let filled = (fraction * 8.0) as usize;
             let bar = format!(
                 "[{}{}] ~{:.0}%",
                 "=".repeat(filled),
-                " ".repeat(20 - filled),
+                "-".repeat(8 - filled),
                 fraction * 100.0
             );
             let estimate = if finalizing {
@@ -587,87 +606,25 @@ fn progress_status(
             (bar, estimate)
         }
         None => {
-            let position = (elapsed.as_millis() / 250 % 20) as usize;
-            let bar = format!("[{}>{}]", " ".repeat(position), " ".repeat(19 - position));
+            let position = (elapsed.as_millis() / 250 % 4) as usize;
+            let bar = ["|", "/", "-", "\\"][position].to_string();
             (
                 bar,
                 if finalizing {
                     "finishing; ETA unknown"
                 } else {
-                    "total unknown; ETA unavailable"
+                    "ETA unavailable"
                 }
                 .into(),
             )
         }
     };
     format!(
-        "{bar} | {count} entries | {rate:.0}/s | elapsed {:.1}s | {estimate}",
+        "{bar} {count} · {rate:.0}/s · {:.0}s · {estimate}",
         elapsed.as_secs_f64()
     )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn discovers_spaced_names_at_any_depth_without_following_excluded_trees() {
-        let workspace = Workspace::new(&std::env::temp_dir().join("nasfind-test.db")).unwrap();
-        let root = &workspace.0;
-        for path in [
-            "nested/System Volume Information",
-            "System Volume Information/child/System Volume Information",
-            "node_modules/System Volume Information",
-            "cache/System Volume Information",
-            "System",
-            "Volume",
-        ] {
-            fs::create_dir_all(root.join(path)).unwrap();
-        }
-        std::os::unix::fs::symlink(root, root.join("loop")).unwrap();
-        let idx = IndexConfig {
-            name: "test".into(),
-            root: root.clone(),
-            database: root.join("test.db"),
-            filters: crate::config::Filters {
-                exclude_dirs: vec!["node_modules".into(), "System Volume Information".into()],
-                exclude_paths: vec!["cache".into()],
-                ..Default::default()
-            },
-        };
-        let mut paths = spaced_directory_paths(&idx).unwrap();
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                root.join("System Volume Information"),
-                root.join("nested/System Volume Information")
-            ]
-        );
-    }
-
-    #[test]
-    fn progress_estimates_remaining_time_from_previous_count() {
-        let status = progress_status(50, Duration::from_secs(10), Some(100), false);
-        assert!(status.contains("~50%"));
-        assert!(status.contains("ETA ~0m10s"));
-    }
-
-    #[test]
-    fn progress_never_claims_completion_from_an_estimate() {
-        let status = progress_status(150, Duration::from_secs(10), Some(100), false);
-        assert!(status.contains("~99%"));
-        assert!(status.contains("past estimate; ETA unknown"));
-        let first_run = progress_status(0, Duration::ZERO, None, false);
-        assert!(!first_run.contains('%'));
-        assert!(first_run.contains("ETA unavailable"));
-        let finalizing = progress_status(50, Duration::from_secs(10), Some(100), true);
-        assert!(finalizing.contains("finishing; ETA unknown"));
-    }
-
-    #[test]
-    fn escapes_database_list_separators() {
-        let escaped = database_arg(Path::new(r"/tmp/a:b\c.db"));
-        assert_eq!(escaped.as_bytes(), br"/tmp/a\:b\\c.db");
-    }
-}
+#[path = "../tests/unit/indexer.rs"]
+mod tests;

@@ -19,7 +19,7 @@ pub struct SearchOptions {
     pub indexes: Vec<String>,
     /// One or more plocate patterns. Multiple patterns are ANDed.
     #[arg(required = true)]
-    pub patterns: Vec<String>,
+    pub patterns: Vec<OsString>,
     /// Match without ASCII/locale case sensitivity.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
@@ -46,6 +46,36 @@ struct JsonResult<'a> {
 }
 
 pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
+    let mut output = BufWriter::new(io::stdout().lock());
+    let mut written = 0;
+    visit_paths(cfg, options, |path| {
+        if options.json {
+            output.write_all(if written == 0 { b"[" } else { b"," })?;
+            let path = String::from_utf8_lossy(path);
+            serde_json::to_writer(&mut output, &JsonResult { path: &path })?;
+        } else {
+            output.write_all(path)?;
+            output.write_all(if options.null { b"\0" } else { b"\n" })?;
+        }
+        written += 1;
+        Ok(())
+    })?;
+    if options.json {
+        if written == 0 {
+            output.write_all(b"[")?;
+        }
+        output.write_all(b"]\n")?;
+    }
+    output.flush()?;
+    Ok(())
+}
+
+// Share byte-safe streaming, filters and child cleanup with stats.
+pub fn visit_paths(
+    cfg: &Config,
+    options: &SearchOptions,
+    mut visit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
     if options.patterns.is_empty() {
         bail!("at least one search pattern is required");
     }
@@ -119,15 +149,11 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
         .context("plocate stderr was not captured")?;
     let diagnostics = thread::spawn(move || io::copy(&mut stderr, &mut io::stderr().lock()));
     let mut reader = BufReader::new(stdout);
-    let mut output = BufWriter::new(io::stdout().lock());
     let mut buf = Vec::new();
     let mut written = 0_usize;
     let mut stopped_early = false;
 
     let result: Result<()> = (|| {
-        if options.json {
-            output.write_all(b"[")?;
-        }
         loop {
             buf.clear();
             if reader
@@ -140,21 +166,11 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
             if buf.last() == Some(&0) {
                 buf.pop();
             }
-            if has_filters && is_excluded(&buf, &indexes) {
+            if buf.is_empty() || (has_filters && is_excluded(&buf, &indexes)) {
                 continue;
             }
 
-            if options.json {
-                if written > 0 {
-                    output.write_all(b",")?;
-                }
-                // JSON requires Unicode; raw text and NUL output retain filename bytes.
-                let path = String::from_utf8_lossy(&buf);
-                serde_json::to_writer(&mut output, &JsonResult { path: &path })?;
-            } else {
-                output.write_all(&buf)?;
-                output.write_all(if options.null { b"\0" } else { b"\n" })?;
-            }
+            visit(&buf)?;
             written += 1;
             if has_filters && options.limit.is_some_and(|limit| written >= limit) {
                 stopped_early = true;
@@ -180,10 +196,6 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     if !(status.success() || empty_database || (stopped_early && diagnostic_bytes == 0)) {
         bail!("plocate exited with status {status}");
     }
-    if options.json {
-        output.write_all(b"]\n")?;
-    }
-    output.flush()?;
     Ok(())
 }
 
@@ -218,35 +230,5 @@ fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    fn idx(name: &str, root: &str, exts: &[&str]) -> IndexConfig {
-        IndexConfig {
-            name: name.into(),
-            root: PathBuf::from(root),
-            database: PathBuf::from(format!("/tmp/{name}.db")),
-            filters: crate::config::Filters {
-                exclude_extensions: exts.iter().map(|s| s.to_string()).collect(),
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn extension_filter_is_case_insensitive() {
-        let a = idx("a", "/data", &["tmp", ".pyc"]);
-        assert!(is_excluded(b"/data/x.TMP", &[&a]));
-        assert!(is_excluded(b"/data/x.pyc", &[&a]));
-        assert!(!is_excluded(b"/data/x.nc", &[&a]));
-    }
-
-    #[test]
-    fn nested_root_uses_longest_match() {
-        let outer = idx("outer", "/data", &["tmp"]);
-        let inner = idx("inner", "/data/keep", &[]);
-        assert!(!is_excluded(b"/data/keep/file.tmp", &[&outer, &inner]));
-    }
-}
+#[path = "../tests/unit/search.rs"]
+mod tests;

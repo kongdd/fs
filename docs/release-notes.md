@@ -1,18 +1,21 @@
 # nasfind v0.2.0
 
-为 NAS 文件名检索提供 plocate 的轻量 CLI 封装。
+新增 Rust 原生目录统计，日常使用统一为 `nasfind` 命令。
 
-- 提供 Linux x86_64、aarch64 静态二进制 ZIP，无需 Rust 编译器。
-- 群晖用户先运行 `uname -m` 选择架构，再按 `SYNOLOGY.md` 准备预编译依赖。
-  `python3 setup-tools.py` 从官方 Alpine 软件源下载私有 plocate、GNU sort 和运行库；
-  需要 Python 3.8+ 和网络。ZIP 未内置这些外部工具。
-- 支持多个 DB；全局过滤作为默认，局部按字段覆盖，未定义继承，`[]` 禁用该项。
-- 默认排除已指定语言的环境、依赖、Rust 编译输出、NAS 回收站与系统元数据。
-- 支持 `nasfind -i -l 50 soil` 等省略 search 的操作。
-- `index --folder PATH` 只扫描子目录并合并回主 DB；失败保留旧 DB。
-- 提供 NAS 效率测试脚本 `benchmark.py`，记录建库、局部合并及查询 P50/P95。
-- 普通 Linux 定时器每 48 小时更新；群晖请用 DSM 任务计划程序设定每两天更新。
+- `nasfind stats` 支持 Top N、指定索引、子目录及递归/非递归统计。
+- `nasfind index update` 自动初始化新索引，并在更新后维护统计缓存。
+- `stats.db` 同时保存两种计数，路径只存一份；旧版缓存自动迁移，不重建文件索引。
+- 统计只查询数据库，不遍历索引目录；多索引重复路径会去重。
+- 更新进度显示处理速度、耗时及估算剩余时间，首次建库不虚报 ETA。
+- 移除旧版 `dircount` 脚本，目录统计统一使用 `nasfind stats`，不依赖 Python。
+- 通用配置模板与本地 NAS 配置分离，Rust 单元测试移到 `tests/unit/`。
 
-局部合并需本地重建主 DB，会丢失目录复用缓存；含换行的文件名需要全量更新。
-发布前在两种架构 Linux 上验证静态程序、依赖准备、索引与查询；尚未在你的 DSM 7.4
-上实测，性能需要运行安装包中的基准脚本。当前不提供 Mac/Windows 原生程序。
+日常命令：
+
+```bash
+nasfind index update
+nasfind stats -n10
+nasfind stats --recursive false
+```
+
+发布流程构建 Linux x86_64、aarch64 静态程序。plocate 为外部依赖；群晖安装请参考 `SYNOLOGY.md`，依赖准备脚本仍需 Python 与网络。

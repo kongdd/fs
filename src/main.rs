@@ -1,9 +1,13 @@
 mod config;
 mod indexer;
 mod search;
+mod stats;
+mod ui;
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -22,7 +26,7 @@ use search::SearchOptions;
 )]
 struct Cli {
     /// Config file. Defaults to $NASFIND_CONFIG, ~/.config/nasfind/config.toml, then /etc/nasfind/config.toml.
-    #[arg(long, global = true)]
+    #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -56,6 +60,9 @@ enum Commands {
     /// Search one or more configured databases.
     Search(SearchOptions),
 
+    /// Rank directories by indexed-entry count without scanning the filesystem.
+    Stats(stats::StatsOptions),
+
     /// Check configuration and external dependencies.
     Doctor,
 }
@@ -70,13 +77,13 @@ enum IndexAction {
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err:#}");
+        ui::log(ui::Tone::Error, format_args!("error: {err:#}"));
         std::process::exit(2);
     }
 }
 
 fn run() -> Result<()> {
-    let args = normalize_implicit_search(env::args().collect());
+    let args = normalize_implicit_search(env::args_os().collect());
     let cli = Cli::parse_from(args);
 
     match cli.command {
@@ -104,39 +111,50 @@ fn run() -> Result<()> {
                         .map(|idx| idx.name.clone())
                         .collect();
                     if missing.is_empty() {
-                        eprintln!("all selected databases already exist; use nasfind index update");
+                        ui::log(
+                            ui::Tone::Warning,
+                            format_args!(
+                                "all selected databases already exist; use nasfind index update"
+                            ),
+                        );
                         return Ok(());
                     }
                     missing
                 }
                 None => names,
             };
-            indexer::build_indexes(&cfg, &names, &folders, !no_progress)
+            indexer::build_indexes(&cfg, &names, &folders, !no_progress)?;
+            stats::refresh(&cfg, &names)
+                .context("index databases updated, but statistics refresh failed")
         }
         Commands::Search(options) => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
             search::search(&cfg, &options)
         }
+        Commands::Stats(options) => {
+            let (cfg, _) = Config::load(cli.config.as_deref())?;
+            stats::stats(&cfg, &options)
+        }
         Commands::Doctor => doctor(cli.config.as_deref()),
     }
 }
 
-fn normalize_implicit_search(mut args: Vec<String>) -> Vec<String> {
+fn normalize_implicit_search(mut args: Vec<OsString>) -> Vec<OsString> {
     if args.len() < 2 {
         return args;
     }
-    const COMMANDS: &[&str] = &["init", "index", "search", "doctor", "help"];
+    const COMMANDS: &[&str] = &["init", "index", "search", "stats", "doctor", "help"];
 
     // Skip global options that may precede the command. This keeps both
     // `nasfind soil` and `nasfind --config cfg.toml soil` convenient.
     let mut pos = 1;
     while pos < args.len() {
-        let arg = args[pos].as_str();
-        if arg == "--config" {
+        let arg = args[pos].to_str().unwrap_or("");
+        if matches!(arg, "--config" | "-c") {
             pos += 2;
             continue;
         }
-        if arg.starts_with("--config=") {
+        if arg.starts_with("--config=") || arg.starts_with("-c=") {
             pos += 1;
             continue;
         }
@@ -147,7 +165,7 @@ fn normalize_implicit_search(mut args: Vec<String>) -> Vec<String> {
     }
 
     if pos < args.len() {
-        let first = args[pos].as_str();
+        let first = args[pos].to_str().unwrap_or("");
         if !COMMANDS.contains(&first) {
             args.insert(pos, "search".into());
         }
@@ -232,76 +250,5 @@ fn expand_tilde(path: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn implicit_search_is_inserted() {
-        let args = vec!["nasfind".into(), "soil".into(), "moisture".into()];
-        let args = normalize_implicit_search(args);
-        assert_eq!(args[1], "search");
-        assert_eq!(args[2], "soil");
-    }
-
-    #[test]
-    fn explicit_command_is_untouched() {
-        let args = vec!["nasfind".into(), "index".into(), "research".into()];
-        assert_eq!(normalize_implicit_search(args.clone()), args);
-    }
-
-    #[test]
-    fn implicit_search_after_config_is_inserted() {
-        let args = vec![
-            "nasfind".into(),
-            "--config".into(),
-            "cfg.toml".into(),
-            "soil".into(),
-        ];
-        let args = normalize_implicit_search(args);
-        assert_eq!(args[3], "search");
-        assert_eq!(args[4], "soil");
-    }
-
-    #[test]
-    fn index_actions_accept_shared_options() {
-        for args in [
-            vec!["nasfind", "index", "update", "research", "--no-progress"],
-            vec!["nasfind", "index", "--no-progress", "update", "research"],
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            assert!(matches!(cli.command, Commands::Index {
-                action: Some(IndexAction::Update { names }), no_progress: true, ..
-            } if names == ["research"]));
-        }
-        let cli = Cli::try_parse_from(["nasfind", "index", "init"]).unwrap();
-        assert!(matches!(cli.command, Commands::Index {
-            action: Some(IndexAction::Init { names }), ..
-        } if names.is_empty()));
-        assert!(
-            Cli::try_parse_from([
-                "nasfind",
-                "index",
-                "update",
-                "research",
-                "--folder",
-                "/research"
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn implicit_search_accepts_options() {
-        for options in [
-            vec!["-i", "soil"],
-            vec!["--json", "-d", "research", "soil"],
-            vec!["--", "--version"],
-        ] {
-            let mut args = vec!["nasfind".to_owned()];
-            args.extend(options.iter().map(|arg| (*arg).to_owned()));
-            let normalized = normalize_implicit_search(args);
-            assert_eq!(normalized[1], "search");
-            assert!(Cli::try_parse_from(normalized).is_ok());
-        }
-    }
-}
+#[path = "../tests/unit/cli.rs"]
+mod tests;

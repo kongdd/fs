@@ -12,6 +12,7 @@ uname -m
 ./nasfind --config config.toml index research --no-progress
 ./nasfind --config config.toml -i -l 50 soil
 ./nasfind --config config.toml -d research '*.nc'
+./nasfind --config config.toml stats -d research -n10
 ./nasfind --config config.toml index --folder /volume1/research/project --no-progress
 ```
 
@@ -48,6 +49,7 @@ python3 benchmark.py --nasfind ./nasfind --config config.toml \
 ```
 
 先记录连续两次普通更新，然后测量局部更新（包括重建整个主 DB）。
+当前 `index` 命令还会刷新统计缓存，因此报告中的更新耗时包含扫描、写库和统计缓存维护，不能视为纯扫描耗时。
 若 DB 已存在，第一次普通更新不是首次建库；第二次也不能保证期间没有文件变化。
 若要测首次建库，请另配一个输出 DB 路径，不要删除正在使用的 DB。
 局部合并会丢失目录复用信息，下一次普通更新耗时可能上升，值得另测一次。

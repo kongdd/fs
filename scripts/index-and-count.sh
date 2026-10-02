@@ -1,6 +1,6 @@
 #!/bin/bash
 # Update nasfind indexes, then rank directories from their databases.
-# Usage: ./scripts/index-and-count.sh [-n20] [other dircount options]
+# Usage: ./scripts/index-and-count.sh [-n20] [other stats options]
 set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -9,4 +9,4 @@ CONFIG="${NASFIND_CONFIG:-$PROJECT/examples/config.toml}"
 
 nasfind --config "$CONFIG" doctor
 nasfind --config "$CONFIG" index update --no-progress
-python3 "$PROJECT/scripts/dircount.py" --config "$CONFIG" -n20 "$@"
+nasfind --config "$CONFIG" stats -n20 "$@"

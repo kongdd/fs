@@ -16,7 +16,14 @@ exclude_dirs = [
   "users", "ZWJTEST", "zouyuhe",
   "Hydro-LSTM", "ET_GW_DATA", "DATABASE_WORLD_V3",
   ".pi-subagents",
-  "typst-packages"
+  "typst-packages",
+  # large dirs
+  "GSIM_catchments", "GSIM_indices",
+  "MSWEP_V280_daily", "hysets", "Boundaries",
+  "ChinaHW", "GLDASV2.1", "LP03", "train_samples", # LAI
+  "FY4B_1H_Prcp", "PhenoCam_V3",
+  "eat_pytorch_in_20_days",
+  "backup", "back_up"
 ]
 exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 # Exact basenames, matched without ASCII case sensitivity.

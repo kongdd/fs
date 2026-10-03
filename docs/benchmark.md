@@ -1,7 +1,7 @@
 # 群晖 NAS 实测
 
 需要 Python 3.8+。测试应在 NAS 的 SSH 终端运行，DB 放在计划实际使用的位置。
-当前没有在你的群晖 DSM 7.4 上测得性能，Linux CI 通过不能代替 NAS 实测。
+已有 [Everything 式检索的 10 万文件实测](everything-search.md)，但不能代替真实目录、设备负载与部署方式的测试。
 
 ## 1. 准备与日常操作
 
@@ -48,11 +48,11 @@ python3 benchmark.py --nasfind ./nasfind --config config.toml \
   --query soil --runs 20 --timeout 7200 --output update-results.json
 ```
 
-先记录连续两次普通更新，然后测量局部更新（包括重建整个主 DB）。
+先记录连续两次普通更新，然后测量局部更新。原生引擎只修改子树相关条目；旧 plocate 后端的局部合并包括重建整个主 DB。
 当前 `index` 命令还会刷新统计缓存，因此报告中的更新耗时包含扫描、写库和统计缓存维护，不能视为纯扫描耗时。
 若 DB 已存在，第一次普通更新不是首次建库；第二次也不能保证期间没有文件变化。
 若要测首次建库，请另配一个输出 DB 路径，不要删除正在使用的 DB。
-局部合并会丢失目录复用信息，下一次普通更新耗时可能上升，值得另测一次。
+原生引擎的局部更新保留目录复用信息。仅旧 plocate 后端的局部合并会丢失该信息，下一次普通更新耗时可能上升，值得另测一次。
 
 在自己建立的测试子目录中添加、删除和重命名少量文件，运行 `index --folder`，
 确认记录正确变化；其他目录中的新文件应保持未索引状态，直到更新该目录或全量更新。
@@ -61,4 +61,15 @@ python3 benchmark.py --nasfind ./nasfind --config config.toml \
 再比较 NAS 建库后复制 DB 到客户端 SSD 查询。各轮使用相同查询、结果上限和过滤规则，
 分别记录执行位置，避免同时进行其他大规模 NAS 任务。
 
-把 JSON 报告发回来，就能判断瓶颈是扫描、主 DB 合并、查询还是大量结果输出。
+报告能比较不同更新和检索场景的总耗时；扫描、写库与统计缓存维护需另外分段计时才能精确归因。
+
+## 4. Everything 模式与直接 plocate 对照
+
+```bash
+python3 scripts/benchmark-everything.py --nasfind target/release/nasfind \
+  --files 100000 --runs 7 --output everything-benchmark.json
+```
+
+发布包中使用 `--nasfind ./nasfind`。脚本在 `~/.cache` 创建并清理独立的合成文件目录和数据库，不更新现有索引。报告保存完整样本，并对查询结果进行参考集合校验；详见 [范围和实测说明](everything-search.md)。
+
+原实验性 Rust 建库实现、测试与历史性能报告保存在仓库的 `backup/rust-engine/`，不参与当前构建或打包。

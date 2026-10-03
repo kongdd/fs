@@ -23,17 +23,16 @@ DSM 7.4 也没有统一的 Linux 内核版本。官方
 
 ## 解压后直接运行
 
-需要 Python 3.8+（可通过群晖提供的 Python 套件安装）和网络连接。Python 仅用于
-准备依赖与运行基准脚本，nasfind 本身不需要 Python。
+程序使用 updatedb/plocate 建库与检索。Python 3.8+ 用于依赖准备或基准脚本，检索本身不需要 Python。原实验性 SQLite/Rust DB 已暂停支持，须用新数据库路径重建。
 
 ```bash
 unzip nasfind-0.2.0-linux-x86_64.zip
 cd nasfind-0.2.0-linux-x86_64
 ./nasfind --version
-python3 setup-tools.py
 ./nasfind init ./config.toml
 ```
 
+未安装工具时先运行 `python3 setup-tools.py`，然后 `export PATH="$PWD/tools/bin:$PATH"`。
 `setup-tools.py` 从官方 Alpine 软件源下载 plocate、GNU coreutils 和所需运行库，
 保存在本目录的 `tools/` 下，不安装到 DSM 系统目录，不需要 root 或编译器。
 工具通过私有 musl 加载器运行；`PACKAGES.json` 记录来源与版本。
@@ -61,7 +60,8 @@ database = "/volume1/nasfind-db/research.db"
 ```
 
 建议将 DB 放在扫描根目录之外；如需放在里面，应在 `exclude_paths` 中排除其目录。
-初次索引需要遍历文件名；局部合并也需要额外磁盘空间与本地主 DB 重建。
+初次索引需要遍历文件名；原生更新按目录修改时间复用条目，`--folder` 在事务内更新子树，不重建整个主 DB。
+旧 plocate 后端的局部合并仍需要额外磁盘空间与本地主 DB 重建。
 目录统计统一使用 `nasfind stats`，不再提供旧版 `dircount` 脚本，也不需要 Python。
 
 ## 安装到 PATH（可选）
@@ -72,8 +72,8 @@ nasfind init
 ```
 
 安装器将准备好的 tools 一起复制到安装前缀的 `lib/nasfind/tools`。
-不运行依赖准备脚本时，也可自行安装 plocate 和 GNU sort，然后使用系统工具；
-自定义工具位置可通过 `[tools]` 配置覆盖。
+原生引擎不需要这些 tools。旧后端也可自行安装 plocate 和 GNU sort，
+自定义旧工具位置可通过 `[tools]` 配置覆盖。
 
 ## 定时更新与效率测试
 

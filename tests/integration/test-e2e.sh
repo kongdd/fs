@@ -37,7 +37,26 @@ database = "$ROOT/archive.db"
 exclude_paths = ["cache with spaces"]
 EOF2
 
-BIN=${1:-target/release/nasfind}
+# This suite exercises plocate and legacy locate semantics; Everything has its own suite.
+REAL_BIN=$(readlink -f "${1:-target/release/nasfind}")
+mkdir -p "$HOME/.cache"
+WRAPPER_DIR=$(mktemp -d "$HOME/.cache/nasfind-legacy.XXXXXX")
+trap 'rm -rf "$ROOT" "$WRAPPER_DIR"' EXIT
+BIN="$WRAPPER_DIR/legacy-nasfind"
+cat > "$BIN" <<EOF_WRAPPER
+#!/usr/bin/env bash
+position=0
+for argument in "\$@"; do
+    case "\$argument" in
+        index) exec "$REAL_BIN" "\$@" --engine plocate ;;
+        search) exec "$REAL_BIN" "\${@:1:\$position}" search --locate "\${@:\$((position + 2))}" ;;
+        doctor|stats|init) exec "$REAL_BIN" "\$@" ;;
+    esac
+    position=\$((position + 1))
+done
+exec "$REAL_BIN" "\$@" --locate
+EOF_WRAPPER
+chmod +x "$BIN"
 "$BIN" --config "$ROOT/config.toml" doctor
 "$BIN" --config "$ROOT/config.toml" index update --no-progress
 
@@ -328,6 +347,20 @@ local_config = base / "local-config.toml"
 local_config.write_text('[filters]\nexclude_extensions=["tmp"]\n[[index]]\nname="research"\nroot=' + json.dumps(root + '/research') + '\ndatabase=' + json.dumps(root + '/research.db') + '\nexclude_extensions=[]\n')
 local = subprocess.run([binary, "--config", str(local_config), "search", "-0", "ignore.tmp"], capture_output=True, timeout=10)
 assert local.returncode == 0 and local.stdout == (root + '/research/ignore.tmp').encode() + b'\0'
+
+# ES-inspired selectors compose with filters, offset, limit and output formats.
+selected_paths = search('--ext', '.NC,txt', '--path', str(base / 'research'), '-0', '*').split(b'\0')[:-1]
+expected_paths = [p for p in search('-0', '*').split(b'\0')[:-1] if p.startswith(os.fsencode(base / 'research') + b'/') and p.rsplit(b'.', 1)[-1].lower() in (b'nc', b'txt')]
+assert selected_paths == expected_paths, (selected_paths, expected_paths)
+assert search('--ext', 'nc', '--ext', 'txt', '--path', str(base / 'research') + '-other', '*') == b''
+assert search('--regex', '--ext', 'NC', 'soil_moisture[.]nc$') == (str(base / 'research/soil_moisture.nc') + '\n').encode()
+all_paths = search('--ext', 'nc,txt', '-0', '*').split(b'\0')[:-1]
+page = search('--ext', 'nc,txt', '--offset', '1', '--limit', '1', '-0', '*').split(b'\0')[:-1]
+assert page == all_paths[1:2], (page, all_paths)
+assert search('--offset', '999999', '--json', '*') == b'[]\n'
+assert search('--ext', 'nc', '--null', 'soil').split(b'\0')[:-1] == [p for p in search('-0', 'soil').split(b'\0')[:-1] if p.rsplit(b'.', 1)[-1].lower() == b'nc']
+assert run('--ext', '.', '*').returncode != 0
+assert run('--ext', 'bad/path', '*').returncode != 0
 
 # Native stats uses the cache, including deleted paths and literal subtree bytes.
 rank_root = base / r'archive/rank[*?]\back'

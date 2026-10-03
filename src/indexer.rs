@@ -152,6 +152,7 @@ fn merge_folder(
     progress: bool,
 ) -> Result<()> {
     let _lock = lock_database(&idx.database)?;
+    crate::database::reject_retired_index(&idx.database)?;
     let workspace = Workspace::new(&idx.database)?;
     let mut subtree = idx.clone();
     subtree.root = folder.to_path_buf();
@@ -366,6 +367,7 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
     }
     let _lock = lock_database(&idx.database)?;
     let start = Instant::now();
+    crate::database::reject_retired_index(&idx.database)?;
     let existing = idx.database.is_file();
     let expected = if progress && existing {
         estimated_entries(cfg, &idx.database)

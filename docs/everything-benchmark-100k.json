@@ -1,0 +1,471 @@
+{
+  "platform": "Linux-4.4.302+-x86_64-with-glibc2.34",
+  "files": 100000,
+  "runs": 7,
+  "load_start": [
+    7.24365234375,
+    3.6669921875,
+    2.548828125
+  ],
+  "queries": {
+    "rare": {
+      "matches": 1,
+      "commands": {
+        "everything": {
+          "p50_ms": 13.866757974028587,
+          "max_ms": 18.85745720937848,
+          "samples": [
+            {
+              "seconds": 0.008712028618901968,
+              "peak_rss_kib": 4612
+            },
+            {
+              "seconds": 0.014563807751983404,
+              "peak_rss_kib": 4548
+            },
+            {
+              "seconds": 0.018380697816610336,
+              "peak_rss_kib": 4464
+            },
+            {
+              "seconds": 0.01885745720937848,
+              "peak_rss_kib": 4544
+            },
+            {
+              "seconds": 0.011709808837622404,
+              "peak_rss_kib": 4492
+            },
+            {
+              "seconds": 0.01246526837348938,
+              "peak_rss_kib": 4480
+            },
+            {
+              "seconds": 0.013866757974028587,
+              "peak_rss_kib": 4484
+            }
+          ],
+          "warmup": {
+            "seconds": 0.012797658797353506,
+            "peak_rss_kib": 4612
+          }
+        },
+        "plocate": {
+          "p50_ms": 14.534718357026577,
+          "max_ms": 20.335117354989052,
+          "samples": [
+            {
+              "seconds": 0.014534718357026577,
+              "peak_rss_kib": 4572
+            },
+            {
+              "seconds": 0.010734617710113525,
+              "peak_rss_kib": 4556
+            },
+            {
+              "seconds": 0.020335117354989052,
+              "peak_rss_kib": 4588
+            },
+            {
+              "seconds": 0.015748757869005203,
+              "peak_rss_kib": 4536
+            },
+            {
+              "seconds": 0.014747777953743935,
+              "peak_rss_kib": 4528
+            },
+            {
+              "seconds": 0.011871798895299435,
+              "peak_rss_kib": 4608
+            },
+            {
+              "seconds": 0.014228907879441977,
+              "peak_rss_kib": 4436
+            }
+          ],
+          "warmup": {
+            "seconds": 0.01269962778314948,
+            "peak_rss_kib": 4580
+          }
+        }
+      }
+    },
+    "and": {
+      "matches": 25000,
+      "commands": {
+        "everything": {
+          "p50_ms": 115.241764113307,
+          "max_ms": 141.38561114668846,
+          "samples": [
+            {
+              "seconds": 0.115241764113307,
+              "peak_rss_kib": 4464
+            },
+            {
+              "seconds": 0.10825901571661234,
+              "peak_rss_kib": 4472
+            },
+            {
+              "seconds": 0.11614773375913501,
+              "peak_rss_kib": 4628
+            },
+            {
+              "seconds": 0.09100597817450762,
+              "peak_rss_kib": 4484
+            },
+            {
+              "seconds": 0.07219612970948219,
+              "peak_rss_kib": 4472
+            },
+            {
+              "seconds": 0.14138561114668846,
+              "peak_rss_kib": 4632
+            },
+            {
+              "seconds": 0.13691783184185624,
+              "peak_rss_kib": 4472
+            }
+          ],
+          "warmup": {
+            "seconds": 0.1485042404383421,
+            "peak_rss_kib": 4560
+          }
+        },
+        "plocate": {
+          "p50_ms": 103.5228855907917,
+          "max_ms": 110.89728493243456,
+          "samples": [
+            {
+              "seconds": 0.0978328469209373,
+              "peak_rss_kib": 4616
+            },
+            {
+              "seconds": 0.1035228855907917,
+              "peak_rss_kib": 4576
+            },
+            {
+              "seconds": 0.09223877731710672,
+              "peak_rss_kib": 4716
+            },
+            {
+              "seconds": 0.0912702283822,
+              "peak_rss_kib": 4572
+            },
+            {
+              "seconds": 0.11089728493243456,
+              "peak_rss_kib": 4616
+            },
+            {
+              "seconds": 0.1057835160754621,
+              "peak_rss_kib": 4620
+            },
+            {
+              "seconds": 0.10427044611424208,
+              "peak_rss_kib": 4564
+            }
+          ],
+          "warmup": {
+            "seconds": 0.09675980731844902,
+            "peak_rss_kib": 4780
+          }
+        }
+      }
+    },
+    "or": {
+      "matches": 50000,
+      "commands": {
+        "everything": {
+          "p50_ms": 126.59245310351253,
+          "max_ms": 142.24890107288957,
+          "samples": [
+            {
+              "seconds": 0.12659245310351253,
+              "peak_rss_kib": 12300
+            },
+            {
+              "seconds": 0.14224890107288957,
+              "peak_rss_kib": 12208
+            },
+            {
+              "seconds": 0.13305992167443037,
+              "peak_rss_kib": 12244
+            },
+            {
+              "seconds": 0.12590525299310684,
+              "peak_rss_kib": 12236
+            },
+            {
+              "seconds": 0.13520878227427602,
+              "peak_rss_kib": 12300
+            },
+            {
+              "seconds": 0.10081699676811695,
+              "peak_rss_kib": 12380
+            },
+            {
+              "seconds": 0.10060702683404088,
+              "peak_rss_kib": 12240
+            }
+          ],
+          "warmup": {
+            "seconds": 0.11367880506440997,
+            "peak_rss_kib": 12316
+          }
+        },
+        "plocate": {
+          "p50_ms": 157.43962861597538,
+          "max_ms": 199.39628429710865,
+          "samples": [
+            {
+              "seconds": 0.14832530077546835,
+              "peak_rss_kib": 10960
+            },
+            {
+              "seconds": 0.15743962861597538,
+              "peak_rss_kib": 18600
+            },
+            {
+              "seconds": 0.17977940570563078,
+              "peak_rss_kib": 19048
+            },
+            {
+              "seconds": 0.1868424853309989,
+              "peak_rss_kib": 19008
+            },
+            {
+              "seconds": 0.19939628429710865,
+              "peak_rss_kib": 19300
+            },
+            {
+              "seconds": 0.062124691903591156,
+              "peak_rss_kib": 8668
+            },
+            {
+              "seconds": 0.06892989110201597,
+              "peak_rss_kib": 12272
+            }
+          ],
+          "warmup": {
+            "seconds": 0.09804012719541788,
+            "peak_rss_kib": 9696
+          }
+        }
+      }
+    },
+    "not": {
+      "matches": 75000,
+      "commands": {
+        "everything": {
+          "p50_ms": 170.46081693843007,
+          "max_ms": 253.2229758799076,
+          "samples": [
+            {
+              "seconds": 0.16822731727734208,
+              "peak_rss_kib": 4480
+            },
+            {
+              "seconds": 0.14059161115437746,
+              "peak_rss_kib": 4544
+            },
+            {
+              "seconds": 0.1470817499794066,
+              "peak_rss_kib": 4484
+            },
+            {
+              "seconds": 0.1870995149947703,
+              "peak_rss_kib": 4484
+            },
+            {
+              "seconds": 0.2532229758799076,
+              "peak_rss_kib": 4472
+            },
+            {
+              "seconds": 0.17046081693843007,
+              "peak_rss_kib": 4472
+            },
+            {
+              "seconds": 0.18676074501127005,
+              "peak_rss_kib": 4408
+            }
+          ],
+          "warmup": {
+            "seconds": 0.16572959767654538,
+            "peak_rss_kib": 4612
+          }
+        }
+      }
+    },
+    "extension": {
+      "matches": 50000,
+      "commands": {
+        "everything": {
+          "p50_ms": 124.45324286818504,
+          "max_ms": 301.6654998064041,
+          "samples": [
+            {
+              "seconds": 0.14744660072028637,
+              "peak_rss_kib": 9516
+            },
+            {
+              "seconds": 0.12445324286818504,
+              "peak_rss_kib": 7428
+            },
+            {
+              "seconds": 0.09952830616384745,
+              "peak_rss_kib": 8080
+            },
+            {
+              "seconds": 0.27486860286444426,
+              "peak_rss_kib": 32864
+            },
+            {
+              "seconds": 0.3016654998064041,
+              "peak_rss_kib": 21128
+            },
+            {
+              "seconds": 0.10578204598277807,
+              "peak_rss_kib": 7228
+            },
+            {
+              "seconds": 0.09000930795446038,
+              "peak_rss_kib": 8936
+            }
+          ],
+          "warmup": {
+            "seconds": 0.11105506494641304,
+            "peak_rss_kib": 7956
+          }
+        },
+        "plocate": {
+          "p50_ms": 166.074946988374,
+          "max_ms": 223.48691010847688,
+          "samples": [
+            {
+              "seconds": 0.19305074494332075,
+              "peak_rss_kib": 18940
+            },
+            {
+              "seconds": 0.11500428384169936,
+              "peak_rss_kib": 10664
+            },
+            {
+              "seconds": 0.12491574324667454,
+              "peak_rss_kib": 14872
+            },
+            {
+              "seconds": 0.201550483237952,
+              "peak_rss_kib": 19044
+            },
+            {
+              "seconds": 0.22348691010847688,
+              "peak_rss_kib": 19060
+            },
+            {
+              "seconds": 0.166074946988374,
+              "peak_rss_kib": 9828
+            },
+            {
+              "seconds": 0.05838696286082268,
+              "peak_rss_kib": 7936
+            }
+          ],
+          "warmup": {
+            "seconds": 0.17944941576570272,
+            "peak_rss_kib": 12008
+          }
+        }
+      }
+    },
+    "limit50": {
+      "matches": 50,
+      "commands": {
+        "everything": {
+          "p50_ms": 7.805119268596172,
+          "max_ms": 8.719808887690306,
+          "samples": [
+            {
+              "seconds": 0.007566949352622032,
+              "peak_rss_kib": 4544
+            },
+            {
+              "seconds": 0.008050248958170414,
+              "peak_rss_kib": 4540
+            },
+            {
+              "seconds": 0.007805119268596172,
+              "peak_rss_kib": 4496
+            },
+            {
+              "seconds": 0.007463029120117426,
+              "peak_rss_kib": 4492
+            },
+            {
+              "seconds": 0.008719808887690306,
+              "peak_rss_kib": 4496
+            },
+            {
+              "seconds": 0.008137329015880823,
+              "peak_rss_kib": 4540
+            },
+            {
+              "seconds": 0.007013778667896986,
+              "peak_rss_kib": 4544
+            }
+          ],
+          "warmup": {
+            "seconds": 0.008274049032479525,
+            "peak_rss_kib": 4468
+          }
+        },
+        "plocate": {
+          "p50_ms": 8.249398786574602,
+          "max_ms": 9.05117904767394,
+          "samples": [
+            {
+              "seconds": 0.009021778125315905,
+              "peak_rss_kib": 4592
+            },
+            {
+              "seconds": 0.007259438745677471,
+              "peak_rss_kib": 4636
+            },
+            {
+              "seconds": 0.008756769355386496,
+              "peak_rss_kib": 4536
+            },
+            {
+              "seconds": 0.007719628978520632,
+              "peak_rss_kib": 4568
+            },
+            {
+              "seconds": 0.008249398786574602,
+              "peak_rss_kib": 4536
+            },
+            {
+              "seconds": 0.00905117904767394,
+              "peak_rss_kib": 4588
+            },
+            {
+              "seconds": 0.0075899092480540276,
+              "peak_rss_kib": 4540
+            }
+          ],
+          "warmup": {
+            "seconds": 0.008127589244395494,
+            "peak_rss_kib": 4636
+          }
+        }
+      }
+    }
+  },
+  "note": "One shared plocate DB. Direct plocate vs nasfind Everything CLI, both NUL output captured. One warmup per command, alternating order of timed runs, no OS caches cleared. Complete results checked against byte-level oracle; limited results checked for count, uniqueness and membership. NOT comparison omitted because plocate has no NOT predicate; OR and extension-list comparisons use equivalent POSIX regexes since plocate has no OR flag. CLI timings include optional GNU time wrapper. No user config or indexes accessed.",
+  "build": {
+    "seconds": 2.6711693229153752,
+    "peak_rss_kib": 158752,
+    "stats_build_seconds": 0.34
+  },
+  "load_end": [
+    12.89208984375,
+    5.673828125,
+    3.2822265625
+  ]
+}

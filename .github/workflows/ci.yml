@@ -49,7 +49,9 @@ jobs:
           test -n "$LIBURING"
           LIBDIR=$(dirname "$LIBURING")
           echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Everything search integration tests
+        run: python3 tests/integration/test-everything.py target/release/nasfind
       - name: End-to-end plocate test
         shell: bash
         run: |
-          bash scripts/test-e2e.sh
+          bash tests/integration/test-e2e.sh

@@ -74,7 +74,8 @@ jobs:
           PACKAGE=$(find dist-out -mindepth 1 -maxdepth 1 -type d)
           python3 "$PACKAGE/setup-tools.py"
           export PATH="$PWD/$PACKAGE/tools/bin:$PATH"
-          bash scripts/test-e2e.sh "$PACKAGE/nasfind"
+          python3 tests/integration/test-everything.py "$PACKAGE/nasfind"
+          bash tests/integration/test-e2e.sh "$PACKAGE/nasfind"
           PREFIX="$RUNNER_TEMP/installed" DATADIR="$RUNNER_TEMP/config" sh "$PACKAGE/install.sh"
           "$RUNNER_TEMP/installed/bin/nasfind" --version
           mkdir -p "$RUNNER_TEMP/smoke/files/project"

@@ -1,21 +1,13 @@
 # nasfind v0.2.0
 
-新增 Rust 原生目录统计，日常使用统一为 `nasfind` 命令。
+统一使用 updatedb 建库、plocate 查询候选，Rust 提供 Everything 式检索与目录统计。
 
-- `nasfind stats` 支持 Top N、指定索引、子目录及递归/非递归统计。
-- `nasfind index update` 自动初始化新索引，并在更新后维护统计缓存。
-- `stats.db` 同时保存两种计数，路径只存一份；旧版缓存自动迁移，不重建文件索引。
-- 统计只查询数据库，不遍历索引目录；多索引重复路径会去重。
-- 更新进度显示处理速度、耗时及估算剩余时间，首次建库不虚报 ETA。
-- 移除旧版 `dircount` 脚本，目录统计统一使用 `nasfind stats`，不依赖 Python。
-- 通用配置模板与本地 NAS 配置分离，Rust 单元测试移到 `tests/unit/`。
+- 默认忽略 ASCII 大小写、匹配文件名；支持 AND/OR/NOT、分组、通配符、ext:/path:/regex:。
+- 支持扩展名/目录筛选、JSON/NUL 输出和过滤去重后的分页；`--locate` 兼容旧语义。
+- 实验性 Rust 建库/索引后端及测试已移至 `backup/rust-engine/`，不参与主构建、CI 或打包。
+- 旧 SQLite/Rust 索引明确报错，不静默覆盖；用新数据库路径重新建库。
+- `nasfind stats` 支持 Top N、指定索引、子目录及递归/非递归计数，SQLite 仅用于统计缓存。
+- `index update` 自动初始化新索引并维护统计缓存；进度单行刷新，重要日志支持终端颜色。
+- 测试集中于 `tests/unit/` 和 `tests/integration/`，性能基准位于 `scripts/`。
 
-日常命令：
-
-```bash
-nasfind index update
-nasfind stats -n10
-nasfind stats --recursive false
-```
-
-发布流程构建 Linux x86_64、aarch64 静态程序。plocate 为外部依赖；群晖安装请参考 `SYNOLOGY.md`，依赖准备脚本仍需 Python 与网络。
+Linux 发布包提供静态 Rust 程序；运行仍需独立的 plocate/updatedb 工具，可用 `setup-tools.py` 准备私有工具。检索本身不依赖 Python。详见群晖安装说明与 [Everything 检索说明](everything-search.md)。

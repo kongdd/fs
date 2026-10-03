@@ -1,5 +1,8 @@
 mod config;
+mod database;
+mod everything;
 mod indexer;
+mod matching;
 mod search;
 mod stats;
 mod ui;
@@ -22,7 +25,7 @@ use search::SearchOptions;
 #[command(
     name = "nasfind",
     version,
-    about = "Fast multi-database NAS file search powered by plocate"
+    about = "Everything-style byte-safe NAS search with plocate and Rust"
 )]
 struct Cli {
     /// Config file. Defaults to $NASFIND_CONFIG, ~/.config/nasfind/config.toml, then /etc/nasfind/config.toml.
@@ -43,7 +46,7 @@ enum Commands {
         force: bool,
     },
 
-    /// Build or update one or more plocate databases.
+    /// Build or update one or more filename indexes.
     Index {
         #[command(subcommand)]
         action: Option<IndexAction>,
@@ -52,9 +55,12 @@ enum Commands {
         /// Scan only this folder and merge its paths into the containing DB. May be repeated.
         #[arg(long = "folder", global = true, conflicts_with = "names")]
         folders: Vec<PathBuf>,
-        /// Disable per-entry progress tracking for maximum indexing throughput.
+        /// Disable live progress (and legacy per-entry tracking).
         #[arg(long, global = true)]
         no_progress: bool,
+        /// Index backend (updatedb/plocate).
+        #[arg(long, global = true, value_enum, default_value_t = IndexEngine::Plocate)]
+        engine: IndexEngine,
     },
 
     /// Search one or more configured databases.
@@ -65,6 +71,11 @@ enum Commands {
 
     /// Check configuration and external dependencies.
     Doctor,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum IndexEngine {
+    Plocate,
 }
 
 #[derive(Subcommand, Debug)]
@@ -93,6 +104,7 @@ fn run() -> Result<()> {
             names,
             folders,
             no_progress,
+            engine: _,
         } => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
             if action.is_some() && !names.is_empty() {
@@ -195,6 +207,9 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     let (cfg, path) = Config::load(config_path)?;
     println!("config: {}", path.display());
     println!("indexes: {}", cfg.index.len());
+    for idx in &cfg.index {
+        database::reject_retired_index(&idx.database)?;
+    }
     check_command(&cfg.tools.plocate, "--version")?;
     check_command(&cfg.tools.updatedb, "--version")?;
     check_command(&cfg.tools.plocate_build, "--version")?;

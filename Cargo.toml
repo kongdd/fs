@@ -3,16 +3,17 @@ name = "nasfind"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
-description = "A tiny multi-database NAS file finder powered by plocate"
+description = "Everything-style byte-safe NAS search with updatedb and plocate"
 license = "MIT"
 repository = "https://github.com/kongdd/nasfind"
 readme = "README.md"
-keywords = ["nas", "plocate", "locate", "search", "cli"]
+keywords = ["nas", "indexing", "filename", "search", "cli"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
+regex = "1.12"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

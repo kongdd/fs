@@ -1,4 +1,4 @@
-# Tool paths are detected automatically; optional [tools] overrides are supported.
+# updatedb/plocate are required. Override their paths with [tools] if needed.
 [filters]
 # Installed environments, dependency trees, caches and NAS/system metadata.
 # Keep project directories and source files; add custom installation paths per index.

@@ -32,6 +32,9 @@ pub struct StatsOptions {
 }
 
 pub fn stats(cfg: &Config, options: &StatsOptions) -> Result<()> {
+    for idx in cfg.select(&options.indexes)? {
+        crate::database::reject_retired_index(&idx.database)?;
+    }
     let root = options.path.as_deref().map(absolute_path).transpose()?;
     let mut connection = cache::open(cfg)?;
     let cached = cache::ensure(&mut connection, cfg, &options.indexes)?;
@@ -160,7 +163,7 @@ impl Counts {
 }
 
 fn collect(cfg: &Config, indexes: &[String]) -> Result<Counts> {
-    // A single plocate DB already has unique paths; do not retain all records.
+    // A single index already has unique paths; do not retain all records.
     let mut counts = Counts::new(cfg.select(indexes)?.len() > 1);
     let query = SearchOptions {
         indexes: indexes.to_vec(),
@@ -171,6 +174,7 @@ fn collect(cfg: &Config, indexes: &[String]) -> Result<Counts> {
         limit: None,
         json: false,
         null: true,
+        ..Default::default()
     };
     search::visit_paths(cfg, &query, |path| {
         counts.add(path);

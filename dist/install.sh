@@ -12,12 +12,8 @@ fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-for cmd in plocate updatedb plocate-build sort; do
-    if [ ! -x "$SCRIPT_DIR/tools/bin/$cmd" ] && ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "missing dependency: $cmd (run python3 setup-tools.py, or install plocate and GNU sort)" >&2
-        exit 1
-    fi
-done
+# updatedb/plocate are required; install packaged private tools if present.
+# Run setup-tools.py beforehand when system commands are unavailable.
 
 BIN="$SCRIPT_DIR/nasfind"
 

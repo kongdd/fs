@@ -1,10 +1,10 @@
 # nasfind
 
-NAS 文件名搜索工具，基于 **plocate**。支持多个索引、目录排除和更新进度；`nasfind stats` 可快速查看哪些目录包含最多的索引条目。
+NAS 文件名搜索工具，默认由 **updatedb 建库、plocate 检索候选、Rust 实现 Everything 式语法与筛选**。支持多个索引、目录排除和增量更新；`nasfind stats` 可快速查看哪些目录包含最多的索引条目。实验性 Rust 建库代码已移至 `backup/rust-engine/`，不参与当前编译。
 
 ## 安装与配置（只需一次）
 
-下载并解压 [Releases](https://github.com/kongdd/nasfind/releases) 中的 Linux 发布包，需要安装 plocate，日常搜索和统计不依赖 Python。群晖用户参考[安装说明](docs/synology.md)。
+下载并解压 [Releases](https://github.com/kongdd/nasfind/releases) 中的 Linux 发布包。默认后端需 plocate/updatedb；可运行 `python3 setup-tools.py` 准备私有工具，检索本身不需要 Python。群晖用户参考[安装说明](docs/synology.md)。源码新增功能需使用新版构建。
 
 在解压目录中安装到用户目录，无需修改系统目录：
 
@@ -40,7 +40,22 @@ nasfind -i -l 20 ERA5             # 忽略大小写，最多返回 20 条
 nasfind doctor                   # 检查配置和依赖
 ```
 
-更新时在同一行原地刷新进度条、数字、速度和耗时，不逐次新增行；首次扫描用 spinner 表示活动。非终端输出不打印中间进度，只保留开始、完成等日志。预计剩余时间参考旧数据库的条目数，仅为估算；首次建立索引没有已知总量，不显示虚假的完成时间。终端中重要状态带颜色（青色：进行中，绿色：完成，黄色：提示，红色：错误）；重定向输出、设置 `NO_COLOR` 或 `TERM=dumb` 时不着色。加上 `--no-progress` 可关闭进度显示。
+增量更新由 updatedb 负责；进度在同一行刷新，不新增行。非终端输出只保留状态日志。重要状态带颜色，重定向输出、`NO_COLOR` 或 `TERM=dumb` 时不着色。`--no-progress` 关闭进度显示。
+
+**旧 Rust 索引**：SQLite/Rust 格式已暂停支持。请将 `database` 配置改为新路径，再运行 `index update` 建立 plocate DB；不会自动覆盖原索引。
+
+## 检索筛选
+
+```bash
+nasfind --ext nc,tif soil             # 扩展名筛选，可重复 --ext；忽略扩展名大小写
+nasfind --path /volume1/research soil # 只查指定目录及其子目录
+nasfind -r 'soil_.*[.]nc$'            # plocate POSIX 扩展正则
+nasfind --offset 20 -l 20 soil        # 跳过筛选后的前 20 条，再返回 20 条
+nasfind -b soil                      # 只匹配文件名，不匹配目录名
+nasfind --json soil                  # JSON 输出；-0 输出原始 NUL 分隔路径
+```
+
+默认忽略 ASCII 大小写、匹配文件名；空格 AND，`|` OR，`!` NOT，`<...>` 分组，例如 `nasfind '<soil | rain> ext:nc;tif !backup'`。`-p` 匹配完整路径，`--case-sensitive` 区分大小写，`--locate` 恢复旧语义。支持范围和实测见 [Everything 式检索](docs/everything-search.md)。扩展名和路径筛选只读取索引，不访问 NAS 文件元数据；`--path` 按路径组件匹配，不解释通配符，相对路径以当前目录为基准，不解析符号链接。只有 `-e` / `--existing` 会检查结果是否仍存在。`--ext` 不覆盖配置中的排除规则；分页沿用数据库返回顺序，并非稳定排序。
 
 ## 目录统计
 
@@ -60,9 +75,10 @@ nasfind stats --recursive false       # 只统计直接子项
 ## 更多说明
 
 - 所有命令的详细参数：`nasfind --help`、`nasfind index --help`、`nasfind stats --help`。
+- [Everything 式检索与实测](docs/everything-search.md)
 - [群晖安装](docs/synology.md) · [性能测试](docs/benchmark.md)
-- 开发检查：`make check`；端到端测试：`make e2e`。Rust 单元测试位于 `tests/unit/`。
+- 开发检查：`make check`；端到端测试：`make e2e`。Rust 单元测试位于 `tests/unit/`，端到端测试位于 `tests/integration/`；`scripts/` 只放工具与基准脚本。
 
 ## 许可证
 
-MIT。plocate 为独立依赖，遵循其自身许可证。
+MIT。plocate 为独立程序，遵循其自身许可证。

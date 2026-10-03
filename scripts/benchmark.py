@@ -91,7 +91,7 @@ def main():
             print("Timing partial update: {}...".format(folder), flush=True)
             sample = measure(command + ["index", "--folder", folder, "--no-progress"], args.timeout)
             report["updates"].append({"kind": "partial", "folder": folder, **sample})
-            print("  {:.3f} s (includes local rebuild of the main DB)".format(sample["seconds"]), flush=True)
+            print("  {:.3f} s (includes statistics refresh; legacy plocate also rebuilds the main DB)".format(sample["seconds"]), flush=True)
         for query in args.query:
             search = command + ["search", "-0"]
             for index in args.index:

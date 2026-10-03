@@ -10,7 +10,8 @@ check:
 
 e2e:
 	cargo build --release
-	bash scripts/test-e2e.sh
+	python3 tests/integration/test-everything.py target/release/nasfind
+	bash tests/integration/test-e2e.sh
 
 package:
 	bash scripts/package.sh

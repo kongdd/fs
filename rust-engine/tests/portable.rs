@@ -164,7 +164,10 @@ fn windows_path_patterns_and_scopes() {
     });
     assert_eq!(
         paths,
-        [path_bytes(&idx.root.join("nested/rain.nc")).into_owned()]
+        [
+            path_bytes(&idx.root.join("nested")).into_owned(),
+            path_bytes(&idx.root.join("nested/rain.nc")).into_owned(),
+        ]
     );
     let query = native::Query::new(&SearchOptions {
         patterns: vec![idx.root.join("nested").into_os_string()],

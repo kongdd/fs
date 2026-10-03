@@ -9,7 +9,6 @@ mod everything;
 mod indexer;
 mod native;
 mod search;
-#[path = "../../src/stats.rs"]
 mod stats;
 #[path = "../../src/ui.rs"]
 mod ui;

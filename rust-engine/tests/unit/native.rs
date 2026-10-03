@@ -356,7 +356,7 @@ fn block_codec_preserves_raw_bytes_and_rejects_corruption() {
             params![b"/root", b""],
         )
         .unwrap();
-    let mut compressor = zstd::bulk::Compressor::new(3).unwrap();
+    let mut encoder = BlockEncoder::new().unwrap();
     let mut postings = HashMap::new();
     let data = b"bad_\xff.nc\0line\nfile.txt\0";
     write_block(
@@ -366,7 +366,7 @@ fn block_codec_preserves_raw_bytes_and_rejects_corruption() {
         2,
         b"/root/",
         &mut postings,
-        &mut compressor,
+        &mut encoder,
     )
     .unwrap();
     let query = Query::new(&SearchOptions {
@@ -440,6 +440,409 @@ fn posting_batch_flushes_and_merges_sorted_unique_ids() {
         .unwrap();
     assert_eq!(n, 262_145);
     assert_eq!(unpack(&data).unwrap(), (1..=262_145).collect::<Vec<_>>());
+}
+
+#[test]
+fn fresh_posting_table_keeps_slots_stable_across_growth() {
+    let mut table = FreshPostingTable::default();
+    let keys = [0, 1, 255, 256, 257, 65535, 65536, 0xffff00, 0xffffff];
+    for (index, gram) in keys.into_iter().enumerate() {
+        assert!(table.get(gram).is_none());
+        table.get_or_insert(gram).last = index as u64 + 1;
+    }
+    // Grow the entry vector without moving any slot's logical index.
+    for gram in 0x120000..0x120200 {
+        table.get_or_insert(gram).last = u64::from(gram);
+    }
+    for (index, gram) in keys.into_iter().enumerate() {
+        assert_eq!(table.get(gram).unwrap().last, index as u64 + 1);
+        table.get_or_insert(gram).count += 1;
+        assert_eq!(table.get(gram).unwrap().count, 1);
+    }
+    for gram in 0x120000..0x120200 {
+        assert_eq!(table.get(gram).unwrap().last, u64::from(gram));
+    }
+    assert_eq!(table.entries.len(), keys.len() + 512);
+    assert!(table.get(2).is_none()); // Empty slot in an allocated page.
+    assert!(table.get(0x800000).is_none()); // Unallocated page.
+    assert!(table.get(1 << 24).is_none());
+}
+
+#[test]
+fn block_encoder_reuses_buffers_without_retaining_previous_bytes() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    let mut encoder = BlockEncoder::new().unwrap();
+    let mut large = vec![b'A'; 4096];
+    large.push(0);
+    let mut compressed_capacity = 0;
+    let mut suffix_capacity = 0;
+    for (index, data) in [large.as_slice(), b"x\0", b"bad_\xff\0line\nname\0"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut postings = HashMap::new();
+        let n = data.iter().filter(|&&byte| byte == 0).count();
+        write_block(&connection, 0, data, n, b"", &mut postings, &mut encoder).unwrap();
+        let compressed: Vec<u8> = connection
+            .query_row(
+                "SELECT data FROM blocks WHERE id=?",
+                [connection.last_insert_rowid()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            zstd::bulk::decompress(&compressed, data.len()).unwrap(),
+            data
+        );
+        let expected: HashSet<_> = data[..data.len() - 1]
+            .split(|&byte| byte == 0)
+            .flat_map(trigram_keys)
+            .collect();
+        assert_eq!(postings.keys().copied().collect::<HashSet<_>>(), expected);
+        if index == 0 {
+            compressed_capacity = encoder.compressed.capacity();
+            suffix_capacity = encoder.suffix.capacity();
+        }
+        assert_eq!(encoder.compressed.capacity(), compressed_capacity);
+        assert_eq!(encoder.suffix.capacity(), suffix_capacity);
+    }
+}
+
+#[test]
+fn fresh_postings_encode_once_and_publish_only_at_finish() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    let mut fresh = FreshPostings::default();
+    fresh
+        .add(&connection, HashMap::from([(123, vec![1, 127, 128])]))
+        .unwrap();
+    fresh
+        .add(
+            &connection,
+            HashMap::from([(123, vec![99999]), (456, vec![200000])]),
+        )
+        .unwrap();
+    assert_eq!(fresh.segments, 0);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM postings", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    fresh.finish(&connection).unwrap();
+    for (gram, ids) in [(123, vec![1, 127, 128, 99999]), (456, vec![200000])] {
+        let (data, n): (Vec<u8>, i64) = connection
+            .query_row("SELECT data,n FROM postings WHERE gram=?", [gram], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(data, pack(&ids));
+        assert_eq!(n as usize, ids.len());
+    }
+}
+
+#[test]
+fn fresh_posting_spills_concatenate_delta_streams_without_reencoding() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch("PRAGMA temp_store=FILE;").unwrap();
+    schema(&connection).unwrap();
+    let mut fresh = FreshPostings {
+        byte_limit: 4,
+        ..Default::default()
+    };
+    fresh
+        .add(
+            &connection,
+            HashMap::from([(123, vec![1, 127, 128, 99999])]),
+        )
+        .unwrap();
+    assert_eq!(fresh.segments, 1);
+    assert_eq!(fresh.buffered_bytes, 0);
+    fresh
+        .add(
+            &connection,
+            HashMap::from([(123, vec![u32::MAX as u64]), (456, vec![10, 20])]),
+        )
+        .unwrap();
+    assert_eq!(fresh.segments, 2);
+    fresh
+        .add(&connection, HashMap::from([(123, vec![u64::MAX])]))
+        .unwrap();
+    assert_eq!(fresh.segments, 3);
+    // Leave an unspilled tail and a gram that was absent from the middle spill.
+    fresh
+        .add(&connection, HashMap::from([(456, vec![21])]))
+        .unwrap();
+    assert_eq!(fresh.buffered_bytes, 1);
+    fresh.finish(&connection).unwrap();
+    for (gram, ids) in [
+        (123, vec![1, 127, 128, 99999, u32::MAX as u64, u64::MAX]),
+        (456, vec![10, 20, 21]),
+    ] {
+        let (data, n): (Vec<u8>, i64) = connection
+            .query_row("SELECT data,n FROM postings WHERE gram=?", [gram], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(data, pack(&ids));
+        assert_eq!(unpack(&data).unwrap(), ids);
+        assert_eq!(n as usize, ids.len());
+    }
+    let temporary: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_temp_master WHERE name='fresh_posting_segments'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(temporary, 0);
+}
+
+#[test]
+fn fresh_directory_stream_matches_full_path_grams_across_spills() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    let mut writer = PostingWriter::Fresh(FreshPostings {
+        byte_limit: 1,
+        ..Default::default()
+    });
+    let mut encoder = BlockEncoder::new().unwrap();
+    let mut oracle: HashMap<u32, Vec<u64>> = HashMap::new();
+    for directory in 1..=3 {
+        let prefix = format!("/root/shared_{directory}/").into_bytes();
+        let common = grams(&prefix);
+        let mut postings = writer.directory(&common);
+        let mut directory_keys = HashSet::new();
+        // The last directory is empty; it must still have a reverse-gram row.
+        if directory != 3 {
+            for data in [
+                b"shared_shared_abc\0bad_\xff.nc\0".as_slice(),
+                b"shared_abc\0xyz\0".as_slice(),
+            ] {
+                write_block(
+                    &connection,
+                    directory,
+                    data,
+                    2,
+                    &prefix,
+                    &mut postings,
+                    &mut encoder,
+                )
+                .unwrap();
+                let id = connection.last_insert_rowid() as u64;
+                let mut block_keys = HashSet::new();
+                for name in data[..data.len() - 1].split(|&byte| byte == 0) {
+                    let mut path = prefix.clone();
+                    path.extend_from_slice(name);
+                    block_keys.extend(trigram_keys(&path));
+                }
+                for gram in block_keys {
+                    directory_keys.insert(u64::from(gram));
+                    oracle.entry(gram).or_default().push(id);
+                }
+            }
+        }
+        postings.finish(&connection, directory).unwrap();
+        let data: Vec<u8> = connection
+            .query_row(
+                "SELECT data FROM directory_grams WHERE directory=?",
+                [directory],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut expected: Vec<_> = directory_keys.into_iter().collect();
+        expected.sort_unstable();
+        assert_eq!(unpack(&data).unwrap(), expected);
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM postings", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    writer.flush(&connection).unwrap();
+    let mut select = connection
+        .prepare("SELECT gram,data,n FROM postings")
+        .unwrap();
+    let mut rows = select.query([]).unwrap();
+    while let Some(row) = rows.next().unwrap() {
+        let gram: u32 = row.get(0).unwrap();
+        let expected = oracle.remove(&gram).unwrap();
+        let data: Vec<u8> = row.get(1).unwrap();
+        assert_eq!(data, pack(&expected));
+        assert_eq!(row.get::<_, i64>(2).unwrap() as usize, expected.len());
+    }
+    assert!(oracle.is_empty());
+}
+
+#[test]
+fn fresh_postings_reject_nonmonotonic_ids_even_after_spilling() {
+    for limit in [1, usize::MAX] {
+        for invalid in [9, 10] {
+            let connection = Connection::open_in_memory().unwrap();
+            schema(&connection).unwrap();
+            let mut fresh = FreshPostings {
+                byte_limit: limit,
+                ..Default::default()
+            };
+            fresh
+                .add(&connection, HashMap::from([(123, vec![10])]))
+                .unwrap();
+            assert!(
+                fresh
+                    .add(&connection, HashMap::from([(123, vec![invalid])]))
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn fresh_posting_spills_and_final_rows_roll_back_together() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    {
+        let transaction = connection.transaction().unwrap();
+        let mut fresh = FreshPostings {
+            byte_limit: 1,
+            ..Default::default()
+        };
+        fresh
+            .add(&transaction, HashMap::from([(123, vec![1, 2])]))
+            .unwrap();
+        fresh.finish(&transaction).unwrap();
+        // Drop the transaction without commit, as on a scan failure.
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM postings", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM sqlite_temp_master", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn fresh_build_bulk_directory_index_preserves_unique_paths() {
+    let fixture = Fixture::new();
+    update(&fixture.idx, None, false).unwrap();
+    let connection = Connection::open(&fixture.idx.database).unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO directories(path,stamp) VALUES (?,?)",
+                params![fixture.idx.root.as_os_str().as_bytes(), b""]
+            )
+            .is_err()
+    );
+    let indexed: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='directory_paths'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 1);
+}
+
+#[test]
+fn fresh_scanner_preserves_order_filters_and_symlink_rules() {
+    let mut fixture = Fixture::new();
+    for name in ["a", "b", "z", "z/child", "hidden", "blocked"] {
+        fs::create_dir_all(fixture.idx.root.join(name)).unwrap();
+    }
+    std::os::unix::fs::symlink(&fixture.idx.root, fixture.idx.root.join("loop")).unwrap();
+    fixture.idx.filters.exclude_dirs = vec!["hidden".into()];
+    fixture.idx.filters.exclude_paths = vec![PathBuf::from("blocked")];
+    let mut scanner = scan::Scanner::new(
+        &fixture.idx.root,
+        &fixture.idx.root,
+        ScanRules::new(&fixture.idx),
+    )
+    .unwrap();
+    let mut paths = Vec::new();
+    while let Some(directory) = scanner.next().unwrap() {
+        assert_eq!(
+            directory.before,
+            scan::read_stamp(&directory.path, &fixture.idx.root).unwrap()
+        );
+        assert!(
+            directory
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
+        paths.push(
+            directory
+                .path
+                .strip_prefix(&fixture.idx.root)
+                .unwrap()
+                .to_path_buf(),
+        );
+    }
+    assert_eq!(paths, ["", "z", "z/child", "b", "a"].map(PathBuf::from));
+    // The writer applies the same filters to stored records as the producer
+    // applies to traversal. A symlink remains a record, never a traversal child.
+    let report = update(&fixture.idx, None, false).unwrap();
+    assert_eq!(report.scanned, 5);
+    assert!(fixture.query(&["hidden"], false, false, false).is_empty());
+    assert!(fixture.query(&["blocked"], false, false, false).is_empty());
+    assert_eq!(fixture.query(&["loop"], true, false, false).len(), 1);
+}
+
+#[test]
+fn fresh_scanner_batches_large_directories_and_cancels_cleanly() {
+    let fixture = Fixture::new();
+    let mut expected = Vec::new();
+    for i in (0..600).rev() {
+        let name = format!("entry_{i:04}_{}", "x".repeat(220));
+        fs::write(fixture.idx.root.join(&name), b"").unwrap();
+        expected.push(std::ffi::OsString::from(name));
+    }
+    expected.sort();
+    let mut scanner = scan::Scanner::new(
+        &fixture.idx.root,
+        &fixture.idx.root,
+        ScanRules::new(&fixture.idx),
+    )
+    .unwrap();
+    let directory = scanner.next().unwrap().unwrap();
+    assert_eq!(
+        directory
+            .entries
+            .into_iter()
+            .map(|(name, is_dir)| {
+                assert!(!is_dir);
+                name
+            })
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(scanner.next().unwrap().is_none());
+    // Error/early-return cleanup must disconnect before joining the worker.
+    drop(
+        scan::Scanner::new(
+            &fixture.idx.root,
+            &fixture.idx.root,
+            ScanRules::new(&fixture.idx),
+        )
+        .unwrap(),
+    );
+    let mut missing = scan::Scanner::new(
+        &fixture.idx.root,
+        &fixture.idx.root.join("missing"),
+        ScanRules::new(&fixture.idx),
+    )
+    .unwrap();
+    assert!(missing.next().is_err());
 }
 
 #[test]

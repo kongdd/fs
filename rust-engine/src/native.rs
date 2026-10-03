@@ -24,6 +24,8 @@ const VERSION: i64 = 2;
 const BLOCK_SIZE: usize = 32;
 const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
+mod scan;
+
 pub fn is_native(path: &Path) -> Result<bool> {
     let mut header = [0; 100];
     let mut file = fs::File::open(path)?;
@@ -58,17 +60,19 @@ fn validate(connection: &Connection) -> Result<()> {
 }
 
 fn schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!("
+    connection.execute_batch(&format!(
+        "
         PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version={VERSION};
         CREATE TABLE meta(key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
-        CREATE TABLE directories(id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, stamp BLOB NOT NULL);
+        CREATE TABLE directories(id INTEGER PRIMARY KEY, path BLOB NOT NULL, stamp BLOB NOT NULL);
         CREATE TABLE blocks(id INTEGER PRIMARY KEY, directory INTEGER NOT NULL,
             data BLOB NOT NULL, size INTEGER NOT NULL, n INTEGER NOT NULL);
         CREATE TABLE children(directory INTEGER NOT NULL, name BLOB NOT NULL,
             PRIMARY KEY(directory,name)) WITHOUT ROWID;
         CREATE TABLE postings(gram INTEGER PRIMARY KEY, data BLOB NOT NULL, n INTEGER NOT NULL);
         CREATE TABLE directory_grams(directory INTEGER PRIMARY KEY, data BLOB NOT NULL);
-    "))?;
+    "
+    ))?;
     Ok(())
 }
 
@@ -127,6 +131,7 @@ fn stamp(metadata: &fs::Metadata) -> Vec<u8> {
     .collect()
 }
 
+#[derive(Clone)]
 struct ScanRules {
     directories: HashSet<std::ffi::OsString>,
     paths: Vec<PathBuf>,
@@ -172,16 +177,19 @@ fn grams(path: &[u8]) -> Vec<u32> {
     result
 }
 
+fn push_varint(data: &mut Vec<u8>, mut value: u64) {
+    while value >= 128 {
+        data.push((value as u8 & 127) | 128);
+        value >>= 7;
+    }
+    data.push(value as u8);
+}
+
 fn pack(ids: &[u64]) -> Vec<u8> {
-    let mut data = Vec::new();
+    let mut data = Vec::with_capacity(ids.len());
     let mut previous = 0;
     for &id in ids {
-        let mut delta = id - previous;
-        while delta >= 128 {
-            data.push((delta as u8 & 127) | 128);
-            delta >>= 7;
-        }
-        data.push(delta as u8);
+        push_varint(&mut data, id - previous);
         previous = id;
     }
     data
@@ -213,43 +221,395 @@ fn unpack(data: &[u8]) -> Result<Vec<u64>> {
     Ok(ids)
 }
 
+trait BlockPostings {
+    fn add_gram(&mut self, gram: u32, id: u64) -> Result<()>;
+    fn end_block(&mut self, _id: u64) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl BlockPostings for HashMap<u32, Vec<u64>> {
+    fn add_gram(&mut self, gram: u32, id: u64) -> Result<()> {
+        let ids = self.entry(gram).or_default();
+        if ids.last() != Some(&id) {
+            ids.push(id);
+        }
+        Ok(())
+    }
+}
+
+struct BlockEncoder {
+    compressor: zstd::bulk::Compressor<'static>,
+    compressed: Vec<u8>,
+    suffix: Vec<u8>,
+}
+
+impl BlockEncoder {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            compressor: zstd::bulk::Compressor::new(3)?,
+            compressed: Vec::new(),
+            suffix: Vec::new(),
+        })
+    }
+}
+
 // Postings refer to blocks, not filenames. Grams from different names may
 // intersect; exact matching after decompression removes these false positives.
-fn write_block(
+fn write_block<P: BlockPostings>(
     connection: &Connection,
     directory: i64,
     data: &[u8],
     names: usize,
     prefix: &[u8],
-    postings: &mut HashMap<u32, Vec<u64>>,
-    compressor: &mut zstd::bulk::Compressor<'_>,
+    postings: &mut P,
+    encoder: &mut BlockEncoder,
 ) -> Result<()> {
     if data.len() > MAX_BLOCK_BYTES {
         bail!("filename block exceeds size limit");
     }
-    let compressed = compressor.compress(data)?;
+    let BlockEncoder {
+        compressor,
+        compressed,
+        suffix,
+    } = encoder;
+    compressed.clear();
+    compressed.reserve(zstd::zstd_safe::compress_bound(data.len()));
+    compressor.compress_to_buffer(data, compressed)?;
     connection
         .prepare_cached("INSERT INTO blocks(directory,data,size,n) VALUES (?,?,?,?)")?
         .execute(params![
             directory,
-            compressed,
+            &*compressed,
             data.len() as i64,
             names as i64
         ])?;
     let id = connection.last_insert_rowid() as u64;
-    let mut suffix = Vec::new();
     for name in data[..data.len() - 1].split(|&b| b == 0) {
         suffix.clear();
         suffix.extend_from_slice(&prefix[prefix.len().saturating_sub(2)..]);
         suffix.extend_from_slice(name);
-        for gram in trigram_keys(&suffix) {
-            let ids = postings.entry(gram).or_default();
-            if ids.last() != Some(&id) {
-                ids.push(id);
+        for gram in trigram_keys(suffix) {
+            postings.add_gram(gram, id)?;
+        }
+    }
+    postings.end_block(id)
+}
+
+fn store_directory_grams(
+    connection: &Connection,
+    directory: i64,
+    lists: &HashMap<u32, Vec<u64>>,
+) -> Result<()> {
+    let keys = lists.keys().map(|&gram| u64::from(gram)).collect();
+    store_directory_keys(connection, directory, keys)
+}
+
+fn store_directory_keys(connection: &Connection, directory: i64, mut keys: Vec<u64>) -> Result<()> {
+    keys.sort_unstable();
+    connection
+        .prepare_cached("INSERT INTO directory_grams(directory,data) VALUES (?,?)")?
+        .execute(params![directory, pack(&keys)])?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct EncodedPosting {
+    data: Vec<u8>,
+    last: u64,
+    count: u64,
+}
+
+// Trigrams are 24-bit keys. Lazily allocate 256-slot pages instead of hashing
+// every filename byte window. Slots contain entry index + 1; zero means absent.
+// The page directory costs 512 KiB on 64-bit targets, each used page 1 KiB.
+struct FreshPostingTable {
+    pages: Vec<Option<Box<[u32; 256]>>>,
+    entries: Vec<(u32, EncodedPosting)>,
+}
+
+impl Default for FreshPostingTable {
+    fn default() -> Self {
+        Self {
+            pages: vec![None; 1 << 16],
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl FreshPostingTable {
+    fn get_or_insert(&mut self, gram: u32) -> &mut EncodedPosting {
+        debug_assert!(gram < 1 << 24);
+        let page = self.pages[(gram >> 8) as usize].get_or_insert_with(|| Box::new([0; 256]));
+        let slot = &mut page[(gram & 255) as usize];
+        if *slot == 0 {
+            self.entries.push((gram, EncodedPosting::default()));
+            *slot = self.entries.len() as u32;
+        }
+        &mut self.entries[(*slot - 1) as usize].1
+    }
+
+    fn get(&self, gram: u32) -> Option<&EncodedPosting> {
+        let page = self.pages.get((gram >> 8) as usize)?.as_ref()?;
+        let slot = page[(gram & 255) as usize];
+        slot.checked_sub(1)
+            .map(|index| &self.entries[index as usize].1)
+    }
+}
+
+// Fresh block IDs are globally increasing. Encode each delta once; never read,
+// decode, sort or rewrite a previously published posting during the scan.
+struct FreshPostings {
+    lists: FreshPostingTable,
+    buffered_bytes: usize,
+    byte_limit: usize,
+    segments: i64,
+}
+
+impl Default for FreshPostings {
+    fn default() -> Self {
+        Self {
+            lists: FreshPostingTable::default(),
+            buffered_bytes: 0,
+            byte_limit: 16 * 1024 * 1024,
+            segments: 0,
+        }
+    }
+}
+
+impl FreshPostings {
+    fn append(&mut self, gram: u32, id: u64, first_block: u64) -> Result<bool> {
+        let posting = self.lists.get_or_insert(gram);
+        if posting.count > 0 {
+            if id == posting.last {
+                return Ok(false); // Repeated gram in the same block.
+            }
+            if id < posting.last {
+                bail!("fresh posting IDs are not increasing");
+            }
+        }
+        let first_in_directory = posting.count == 0 || posting.last < first_block;
+        let before = posting.data.len();
+        push_varint(&mut posting.data, id - posting.last);
+        posting.last = id;
+        posting.count += 1;
+        self.buffered_bytes += posting.data.len() - before;
+        Ok(first_in_directory)
+    }
+
+    // Test the encoder/spill boundary separately from filesystem traversal.
+    #[cfg(test)]
+    fn add(&mut self, connection: &Connection, lists: HashMap<u32, Vec<u64>>) -> Result<()> {
+        for (gram, ids) in lists {
+            for id in ids {
+                if self
+                    .lists
+                    .get(gram)
+                    .is_some_and(|posting| posting.count > 0 && id <= posting.last)
+                {
+                    bail!("fresh posting IDs are not increasing");
+                }
+                self.append(gram, id, id)?;
+            }
+        }
+        if self.buffered_bytes >= self.byte_limit {
+            self.spill(connection)?;
+        }
+        Ok(())
+    }
+
+    fn spill(&mut self, connection: &Connection) -> Result<()> {
+        if self.buffered_bytes == 0 {
+            return Ok(());
+        }
+        if self.segments == 0 {
+            connection.execute_batch(
+                "CREATE TEMP TABLE fresh_posting_segments(
+                    gram INTEGER NOT NULL, segment INTEGER NOT NULL, data BLOB NOT NULL,
+                    PRIMARY KEY(gram,segment)) WITHOUT ROWID;
+                 PRAGMA temp.cache_size=-2048;",
+            )?;
+        }
+        let mut lists: Vec<_> = self.lists.entries.iter_mut().collect();
+        lists.sort_unstable_by_key(|(gram, _)| *gram);
+        let mut insert = connection.prepare_cached(
+            "INSERT INTO temp.fresh_posting_segments(gram,segment,data) VALUES (?,?,?)",
+        )?;
+        for (gram, posting) in lists {
+            if !posting.data.is_empty() {
+                insert.execute(params![*gram, self.segments, &posting.data])?;
+                // Keep last/count across spills; following bytes continue the
+                // same delta stream, so final assembly is plain concatenation.
+                posting.data = Vec::new();
+            }
+        }
+        self.segments += 1;
+        self.buffered_bytes = 0;
+        Ok(())
+    }
+
+    fn finish(&mut self, connection: &Connection) -> Result<()> {
+        if self.segments == 0 {
+            let mut lists: Vec<_> = self.lists.entries.iter_mut().collect();
+            lists.sort_unstable_by_key(|(gram, _)| *gram);
+            let mut insert =
+                connection.prepare_cached("INSERT INTO postings(gram,data,n) VALUES (?,?,?)")?;
+            for (gram, posting) in lists {
+                if posting.count > 0 {
+                    insert.execute(params![*gram, &posting.data, posting.count as i64])?;
+                    posting.data = Vec::new();
+                }
+            }
+        } else {
+            self.spill(connection)?;
+            {
+                let mut select = connection.prepare(
+                    "SELECT gram,data FROM temp.fresh_posting_segments ORDER BY gram,segment",
+                )?;
+                let mut rows = select.query([])?;
+                let mut insert = connection
+                    .prepare_cached("INSERT INTO postings(gram,data,n) VALUES (?,?,?)")?;
+                let mut current = None;
+                let mut data = Vec::new();
+                while let Some(row) = rows.next()? {
+                    let gram = row.get::<_, u32>(0)?;
+                    if current.is_some_and(|previous| previous != gram) {
+                        let previous = current.context("missing posting gram")?;
+                        insert.execute(params![
+                            previous,
+                            &data,
+                            self.lists
+                                .get(previous)
+                                .context("missing posting gram")?
+                                .count as i64
+                        ])?;
+                        data.clear();
+                    }
+                    current = Some(gram);
+                    data.extend_from_slice(row.get_ref(1)?.as_blob()?);
+                }
+                if let Some(gram) = current {
+                    insert.execute(params![
+                        gram,
+                        &data,
+                        self.lists.get(gram).context("missing posting gram")?.count as i64
+                    ])?;
+                }
+            }
+            connection.execute_batch("DROP TABLE temp.fresh_posting_segments;")?;
+        }
+        self.buffered_bytes = 0;
+        self.segments = 0;
+        self.lists = FreshPostingTable::default();
+        Ok(())
+    }
+}
+
+enum PostingWriter {
+    Fresh(FreshPostings),
+    Update(PostingBatch),
+}
+
+// Fresh builds retain only one gram-key vector per directory, rather than a
+// separately allocated block-ID vector for every directory/gram pair.
+enum DirectoryPostings<'a> {
+    Fresh {
+        postings: &'a mut FreshPostings,
+        prefix_grams: &'a [u32],
+        keys: Vec<u64>,
+        first_block: Option<u64>,
+    },
+    Update {
+        postings: &'a mut PostingBatch,
+        lists: HashMap<u32, Vec<u64>>,
+    },
+}
+
+impl BlockPostings for DirectoryPostings<'_> {
+    fn add_gram(&mut self, gram: u32, id: u64) -> Result<()> {
+        match self {
+            Self::Fresh {
+                postings,
+                keys,
+                first_block,
+                ..
+            } => {
+                if postings.append(gram, id, *first_block.get_or_insert(id))? {
+                    keys.push(u64::from(gram));
+                }
+                Ok(())
+            }
+            Self::Update { lists, .. } => lists.add_gram(gram, id),
+        }
+    }
+
+    fn end_block(&mut self, id: u64) -> Result<()> {
+        if let Self::Fresh {
+            postings,
+            prefix_grams,
+            keys,
+            first_block,
+        } = self
+        {
+            let first = *first_block.get_or_insert(id);
+            for &gram in *prefix_grams {
+                if postings.append(gram, id, first)? {
+                    keys.push(u64::from(gram));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DirectoryPostings<'_> {
+    fn common_blocks(&mut self, gram: u32, ids: &[u64]) {
+        if let Self::Update { lists, .. } = self {
+            lists.insert(gram, ids.to_vec());
+        }
+    }
+
+    fn finish(self, connection: &Connection, directory: i64) -> Result<()> {
+        match self {
+            Self::Fresh { postings, keys, .. } => {
+                store_directory_keys(connection, directory, keys)?;
+                // Bounds encoded accumulation, not total RSS: lookup pages,
+                // one directory and one final posting remain additional costs.
+                if postings.buffered_bytes >= postings.byte_limit {
+                    postings.spill(connection)?;
+                }
+                Ok(())
+            }
+            Self::Update { postings, lists } => {
+                postings.add(connection, directory, lists)?;
+                postings.flush(connection)
             }
         }
     }
-    Ok(())
+}
+
+impl PostingWriter {
+    fn directory<'a>(&'a mut self, prefix_grams: &'a [u32]) -> DirectoryPostings<'a> {
+        match self {
+            Self::Fresh(postings) => DirectoryPostings::Fresh {
+                postings,
+                prefix_grams,
+                keys: Vec::new(),
+                first_block: None,
+            },
+            Self::Update(postings) => DirectoryPostings::Update {
+                postings,
+                lists: HashMap::new(),
+            },
+        }
+    }
+
+    fn flush(&mut self, connection: &Connection) -> Result<()> {
+        match self {
+            Self::Fresh(postings) => postings.finish(connection),
+            Self::Update(postings) => postings.flush(connection),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -265,11 +625,7 @@ impl PostingBatch {
         directory: i64,
         lists: HashMap<u32, Vec<u64>>,
     ) -> Result<()> {
-        let mut keys: Vec<_> = lists.keys().map(|&gram| u64::from(gram)).collect();
-        keys.sort_unstable();
-        connection
-            .prepare_cached("INSERT INTO directory_grams(directory,data) VALUES (?,?)")?
-            .execute(params![directory, pack(&keys)])?;
+        store_directory_grams(connection, directory, &lists)?;
         for (gram, ids) in lists {
             self.count += ids.len();
             self.lists.entry(gram).or_default().extend(ids);
@@ -358,13 +714,14 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             idx.database.display()
         );
     }
-    let mut compressor = zstd::bulk::Compressor::new(3)?;
+    let mut encoder = BlockEncoder::new()?;
     let mut connection = Connection::open(&idx.database)?;
     connection.busy_timeout(Duration::from_secs(30))?;
     // DELETE journaling keeps each committed snapshot in the DB file itself;
     // stats fingerprints and copied indexes don't depend on WAL sidecars.
     connection.execute_batch(
-        "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-32768;",
+        "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-32768;
+         PRAGMA temp_store=FILE;",
     )?;
     let transaction = connection.transaction()?;
     if !existing {
@@ -393,6 +750,11 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     let force = old_key.as_ref() != Some(&key);
     let scan_root = scope.unwrap_or(&idx.root);
     let rules = ScanRules::new(idx);
+    let mut scanner = if existing {
+        None
+    } else {
+        Some(scan::Scanner::new(&idx.root, scan_root, rules.clone())?)
+    };
     let mut pending = vec![scan_root.to_path_buf()];
     let mut visited = HashSet::new();
     let mut report = UpdateReport::default();
@@ -401,36 +763,40 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     let label: String = idx.name.chars().take(12).collect();
     let label = ui::paint(&label, Tone::Info, ui::stderr_color());
     let mut last = Instant::now();
-    let mut batch = PostingBatch::default();
+    let mut batch = if existing {
+        PostingWriter::Update(PostingBatch::default())
+    } else {
+        PostingWriter::Fresh(FreshPostings::default())
+    };
     // Root itself is an indexed record, but never a traversal child.
     if !existing {
         let root = idx.root.as_os_str().as_bytes();
         transaction.execute("INSERT INTO meta(key,value) VALUES ('root',?)", [root])?;
-        let mut postings = HashMap::new();
+        let mut postings = batch.directory(&[]);
         let mut data = root.to_vec();
         data.push(0);
-        write_block(
-            &transaction,
-            0,
-            &data,
-            1,
-            &[],
-            &mut postings,
-            &mut compressor,
-        )?;
-        batch.add(&transaction, 0, postings)?;
+        write_block(&transaction, 0, &data, 1, &[], &mut postings, &mut encoder)?;
+        postings.finish(&transaction, 0)?;
     }
-    while let Some(directory) = pending.pop() {
+    let profiling = std::env::var_os("NASFIND_SCAN_PROFILE").is_some();
+    let mut directory_sql_elapsed = Duration::ZERO;
+    let mut post_metadata_elapsed = Duration::ZERO;
+    let mut data = Vec::new();
+    loop {
         let scan_start = Instant::now();
-        let metadata = directory_metadata(&directory, &idx.root)
-            .with_context(|| format!("cannot stat {} (index unchanged)", directory.display()))?;
-        if !metadata.is_dir() {
-            bail!(
-                "directory changed type during update: {}",
-                directory.display()
-            );
-        }
-        let before = stamp(&metadata);
+        let (directory, before, prefetched) = if let Some(scanner) = &mut scanner {
+            let Some(directory) = scanner.next()? else {
+                break;
+            };
+            (directory.path, directory.before, Some(directory.entries))
+        } else {
+            let Some(directory) = pending.pop() else {
+                break;
+            };
+            let before = scan::read_stamp(&directory, &idx.root)?;
+            (directory, before, None)
+        };
+        let sql_start = profiling.then(Instant::now);
         let previous: Option<(i64, Vec<u8>)> = if existing {
             transaction
                 .prepare_cached("SELECT id,stamp FROM directories WHERE path=?")?
@@ -449,6 +815,9 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                 .execute(params![directory.as_os_str().as_bytes(), &before])?;
             transaction.last_insert_rowid()
         };
+        if let Some(start) = sql_start {
+            directory_sql_elapsed += start.elapsed();
+        }
         if existing {
             visited.insert(id);
         }
@@ -468,17 +837,23 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         } else {
             // Abort instead of silently deleting unreadable directories from the
             // index. Changes are committed only after the entire scan succeeds.
-            let mut children = fs::read_dir(&directory)
-                .with_context(|| format!("cannot read {} (index unchanged)", directory.display()))?
-                .map(|entry| -> Result<_> {
-                    let entry = entry?;
-                    let kind = entry.file_type()?.is_dir();
-                    // Linux std uses dirent.d_type here, with a stat fallback
-                    // only when the filesystem cannot supply the type.
-                    Ok((entry.file_name(), kind))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            children.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let children = if let Some(children) = prefetched {
+                children
+            } else {
+                let mut children = fs::read_dir(&directory)
+                    .with_context(|| {
+                        format!("cannot read {} (index unchanged)", directory.display())
+                    })?
+                    .map(|entry| -> Result<_> {
+                        let entry = entry?;
+                        let kind = entry.file_type()?.is_dir();
+                        // Uses dirent.d_type, with stat only as a fallback.
+                        Ok((entry.file_name(), kind))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                children.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                children
+            };
             report.scan_elapsed += scan_start.elapsed();
             let index_start = Instant::now();
             if previous.is_some() {
@@ -488,14 +863,14 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             }
             // Hash accumulation avoids a tree lookup for every filename gram.
             // Sort only the final unique keys before writing SQLite pages.
-            let mut postings: HashMap<u32, Vec<u64>> = HashMap::new();
             let mut prefix = directory.as_os_str().as_bytes().to_vec();
             if !prefix.ends_with(b"/") {
                 prefix.push(b'/');
             }
             let common_grams = grams(&prefix);
+            let mut postings = batch.directory(&common_grams);
             let mut block_ids = Vec::new();
-            let mut data = Vec::new();
+            data.clear();
             let mut names = 0;
             for (name, is_dir) in children {
                 // Keep basenames like updatedb: full paths are only necessary
@@ -523,17 +898,21 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                         names,
                         &prefix,
                         &mut postings,
-                        &mut compressor,
+                        &mut encoder,
                     )?;
                     data.clear();
                     names = 0;
-                    block_ids.push(transaction.last_insert_rowid() as u64);
+                    if existing {
+                        block_ids.push(transaction.last_insert_rowid() as u64);
+                    }
                 }
                 if is_dir {
                     transaction
                         .prepare_cached("INSERT INTO children(directory,name) VALUES (?,?)")?
                         .execute(params![id, name])?;
-                    pending.push(path.context("directory path missing")?);
+                    if existing {
+                        pending.push(path.context("directory path missing")?);
+                    }
                 }
             }
             if names > 0 {
@@ -544,20 +923,23 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                     names,
                     &prefix,
                     &mut postings,
-                    &mut compressor,
+                    &mut encoder,
                 )?;
-                block_ids.push(transaction.last_insert_rowid() as u64);
-            }
-            if !block_ids.is_empty() {
-                for gram in common_grams {
-                    postings.insert(gram, block_ids.clone());
+                if existing {
+                    block_ids.push(transaction.last_insert_rowid() as u64);
                 }
             }
-            batch.add(&transaction, id, postings)?;
-            if existing {
-                batch.flush(&transaction)?;
+            if !block_ids.is_empty() {
+                for &gram in &common_grams {
+                    postings.common_blocks(gram, &block_ids);
+                }
             }
+            postings.finish(&transaction, id)?;
+            let metadata_start = profiling.then(Instant::now);
             let after = stamp(&directory_metadata(&directory, &idx.root)?);
+            if let Some(start) = metadata_start {
+                post_metadata_elapsed += start.elapsed();
+            }
             if before != after {
                 bail!(
                     "directory changed during scan: {}; retry (index unchanged)",
@@ -584,10 +966,26 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             last = Instant::now();
         }
     }
+    drop(scanner);
+    if profiling {
+        ui::log(
+            Tone::Info,
+            format_args!(
+                "scan-detail writer: directory_sql {:.6}s · post_metadata {:.6}s",
+                directory_sql_elapsed.as_secs_f64(),
+                post_metadata_elapsed.as_secs_f64(),
+            ),
+        );
+    }
     let finalize_start = Instant::now();
     batch.flush(&transaction)?;
     if !existing {
-        transaction.execute_batch("CREATE INDEX directory_blocks ON blocks(directory);")?;
+        // Bulk index construction avoids per-directory B-tree maintenance and
+        // leaves the same v2 lookup/uniqueness guarantees on committed indexes.
+        transaction.execute_batch(
+            "CREATE UNIQUE INDEX directory_paths ON directories(path);
+             CREATE INDEX directory_blocks ON blocks(directory);",
+        )?;
     }
     // Remove vanished subtrees only when updating an existing database.
     let old_directories = if existing {
@@ -874,6 +1272,74 @@ pub fn visit(
         }
     }
     Ok(true)
+}
+
+// Metadata-only statistics for one unfiltered index. This validates row counts
+// and references, but is not a full integrity scan of compressed filename data.
+pub fn directory_counts(
+    idx: &IndexConfig,
+    mut visitor: impl FnMut(&[u8], i64) -> Result<()>,
+) -> Result<Vec<u8>> {
+    let mut connection = open_read(&idx.database)?;
+    validate(&connection)?;
+    let transaction = connection.transaction()?;
+    let root: Vec<u8> =
+        transaction.query_row("SELECT value FROM meta WHERE key='root'", [], |row| {
+            row.get(0)
+        })?;
+    if root.is_empty() || root.contains(&0) {
+        bail!("corrupt index: invalid root");
+    }
+    // The root is the one full-path record; all other blocks contain basenames.
+    let roots: i64 =
+        transaction.query_row("SELECT count(*) FROM blocks WHERE directory=0", [], |row| {
+            row.get(0)
+        })?;
+    if roots != 1 {
+        bail!("corrupt index: missing or duplicate root block");
+    }
+    let (data, size, n): (Vec<u8>, i64, i64) = transaction.query_row(
+        "SELECT data,size,n FROM blocks WHERE directory=0",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if n != 1
+        || size <= 0
+        || size as u64 > MAX_BLOCK_BYTES as u64
+        || size as u64 != root.len() as u64 + 1
+    {
+        bail!("corrupt index: invalid root block");
+    }
+    let decoded = zstd::bulk::decompress(&data, size as usize)?;
+    if decoded.last() != Some(&0) || decoded[..decoded.len().saturating_sub(1)] != root {
+        bail!("corrupt index: root block mismatch");
+    }
+    let mut statement = transaction.prepare(
+        "SELECT d.path,SUM(b.n),MIN(b.n),MAX(b.n),MIN(b.size),MAX(b.size)
+         FROM blocks b LEFT JOIN directories d ON d.id=b.directory
+         WHERE b.directory<>0 GROUP BY b.directory",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let path: Option<Vec<u8>> = row.get(0)?;
+        let path = path.context("corrupt index: missing block directory")?;
+        let n: i64 = row.get(1)?;
+        let min_n: i64 = row.get(2)?;
+        let max_n: i64 = row.get(3)?;
+        let min_size: i64 = row.get(4)?;
+        let max_size: i64 = row.get(5)?;
+        if path.is_empty()
+            || path.contains(&0)
+            || min_n <= 0
+            || max_n > BLOCK_SIZE as i64
+            || min_size <= 0
+            || max_size > MAX_BLOCK_BYTES as i64
+        {
+            bail!("corrupt index: invalid directory or block metadata");
+        }
+        visitor(&path, n)?;
+    }
+    Ok(root)
 }
 
 struct BlockReader {

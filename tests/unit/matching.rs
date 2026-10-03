@@ -1,5 +1,7 @@
 use super::*;
-use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 fn query(pattern: OsString, basename: bool, ignore_case: bool) -> Query {
     Query::new(&SearchOptions {
@@ -25,6 +27,7 @@ fn globs_match_full_names_and_preserve_raw_bytes() {
     assert!(query("*.txt".into(), true, false).matches(b"/data/line\nfile.txt"));
     assert!(query("[sr]oil?.nc".into(), true, false).matches(b"/data/soil1.nc"));
     assert!(!query("soil*.nc".into(), true, false).matches(b"/data/xsoil.nc"));
+    #[cfg(unix)]
     assert!(
         query(OsString::from_vec(b"bad_\xff".to_vec()), true, false).matches(b"/data/bad_\xff.nc")
     );

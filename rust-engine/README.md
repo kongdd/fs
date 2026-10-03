@@ -1,6 +1,6 @@
 # Rust 实验索引
 
-独立的 Rust 建库与检索引擎，使用 32 文件分块、zstd 和块级 trigram 倒排。主程序仍使用 updatedb/plocate；本目录不进入主程序 CI 或发布包，也不保证全部 CLI 新功能一致。
+独立的 Rust 建库与检索引擎，使用 32 文件分块、zstd 和块级 trigram 倒排。主程序仍使用 updatedb/plocate；本目录有独立跨平台 CI，不进入主程序发布包，也不保证全部 CLI 新功能一致。
 
 ## 构建与使用
 
@@ -14,6 +14,14 @@ rust-engine/target/release/nasfind -c /path/config.toml search soil
 ```
 
 配置沿用主程序，数据库须放在扫描目录外。当前为 **schema v2**，不迁移或覆盖 v1 Rust 库及 plocate 库，请使用新数据库路径。
+
+## 平台
+
+- Linux 默认 plocate；macOS、Windows 默认 Rust，无需外部索引工具。
+- Windows 使用 `nasfind.exe`；`nasfind init` 生成 Windows 配置示例。路径建议写成 `C:/data`，索引和输出路径统一使用 `/`。
+- Unix 文件名字节保持原样；Windows 使用无损 WTF-8，保留非配对 UTF-16 代理项。数据库不跨系统迁移。
+- Windows 不支持 plocate 库或后端；macOS 可选 plocate，但须自行安装对应工具。
+- CI 覆盖 Linux、macOS、Windows 的建库、更新、搜索、统计和离线查询。
 
 ## 实现与限制
 

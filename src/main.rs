@@ -4,6 +4,7 @@ mod everything;
 mod ignore;
 mod indexer;
 mod matching;
+pub mod platform;
 mod search;
 mod stats;
 mod ui;

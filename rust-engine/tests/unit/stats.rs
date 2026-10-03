@@ -9,10 +9,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = env::temp_dir().join(format!("native-stats-{}-{nonce}", std::process::id()));
         let root = base.join("files");
         fs::create_dir_all(root.join("nested/deep")).unwrap();

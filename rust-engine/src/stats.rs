@@ -130,7 +130,7 @@ impl Counts {
         }
         let id = self.directory(parent);
         self.nodes[id].direct += 1;
-        if !is_root(parent) {
+        if !is_root(parent) || cfg!(windows) {
             self.nodes[id].recursive += 1;
         }
     }
@@ -148,7 +148,7 @@ impl Counts {
         self.total += n;
         let id = self.directory(path);
         self.nodes[id].direct += n;
-        if !is_root(path) {
+        if !is_root(path) || cfg!(windows) {
             self.nodes[id].recursive += n;
         }
     }
@@ -159,7 +159,7 @@ impl Counts {
         }
         // Parents are interned first, so aggregation needs no depth sorting.
         let parent = parent_path(path)
-            .filter(|parent| !is_root(parent))
+            .filter(|parent| *parent != path && (!is_root(parent) || cfg!(windows)))
             .map(|parent| self.directory(parent));
         let id = self.nodes.len();
         self.nodes.push(Directory {
@@ -228,10 +228,21 @@ struct Rank {
 }
 
 fn is_root(path: &[u8]) -> bool {
+    #[cfg(windows)]
+    if let Ok(path) = crate::platform::path_from_bytes(path)
+        && path.is_absolute()
+        && path.parent().is_none()
+    {
+        return true;
+    }
     !path.is_empty() && path.iter().all(|byte| *byte == b'/')
 }
 
 fn parent_path(path: &[u8]) -> Option<&[u8]> {
+    #[cfg(windows)]
+    if is_root(path) {
+        return Some(path);
+    }
     let head = &path[..=path.iter().rposition(|byte| *byte == b'/')?];
     if is_root(head) {
         Some(head)
@@ -242,7 +253,9 @@ fn parent_path(path: &[u8]) -> Option<&[u8]> {
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     let path = if let Ok(relative) = path.strip_prefix("~") {
-        PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(relative)
+        crate::platform::home_dir()
+            .context("home directory is not set")?
+            .join(relative)
     } else {
         path.to_path_buf()
     };
@@ -276,10 +289,33 @@ fn separated(count: i64) -> String {
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../../tests/unit/stats.rs"]
 mod shared_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/unit/stats.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_and_unc_roots_have_finite_parent_chains() {
+        for root in [
+            b"C:/".as_slice(),
+            b"//server/share/",
+            b"//?/C:/",
+            b"//?/UNC/server/share/",
+        ] {
+            assert!(is_root(root));
+            assert_eq!(parent_path(root), Some(root));
+            let mut counts = Counts::new(false);
+            counts.add(&[root, b"file"].concat());
+            counts.add(&[root, b"nested/file"].concat());
+            counts.aggregate();
+            assert_eq!(counts.nodes[counts.directories[root]].recursive, 2);
+        }
+    }
+}

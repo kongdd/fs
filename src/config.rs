@@ -202,7 +202,7 @@ impl Config {
                 bail!("duplicate database path: {}", idx.database.display());
             }
             for name in &idx.filters.exclude_dirs {
-                if name.contains('/') {
+                if name.contains('/') || (cfg!(windows) && name.contains('\\')) {
                     bail!(
                         "index {} exclude_dirs entry {:?} contains '/'; use exclude_paths instead",
                         idx.name,
@@ -241,19 +241,42 @@ pub fn default_config_path() -> Option<PathBuf> {
         }
     }
 
-    if let Ok(home) = env::var("HOME") {
-        let path = PathBuf::from(home).join(".config/nasfind/config.toml");
+    if let Some(home) = crate::platform::home_dir() {
+        let path = home.join(".config/nasfind/config.toml");
         if path.is_file() {
             return Some(path);
         }
     }
 
+    #[cfg(windows)]
+    let system = PathBuf::from(env::var_os("APPDATA")?).join("nasfind/config.toml");
+    #[cfg(unix)]
     let system = PathBuf::from("/etc/nasfind/config.toml");
     system.is_file().then_some(system)
 }
 
+#[cfg(unix)]
 pub const EXAMPLE_CONFIG: &str = include_str!("../examples/config.example.toml");
+#[cfg(windows)]
+pub const EXAMPLE_CONFIG: &str = include_str!("../examples/config.windows.toml");
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/unit/config.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_example_uses_absolute_paths() {
+        let cfg = Config::parse(EXAMPLE_CONFIG).unwrap();
+        assert!(
+            cfg.index
+                .iter()
+                .all(|idx| idx.root.is_absolute() && idx.database.is_absolute())
+        );
+        assert!(Config::parse(&EXAMPLE_CONFIG.replace("C:/Users", "C:Users")).is_err());
+        assert!(Config::parse(&EXAMPLE_CONFIG.replace(".git", r"cache\\\\nested")).is_err());
+    }
+}

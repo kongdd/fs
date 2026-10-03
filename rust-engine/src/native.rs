@@ -4,7 +4,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{Read, Write},
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -14,6 +13,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
     config::IndexConfig,
+    platform::{directory_stamp as stamp, normalize, os_string, path_bytes, path_from_bytes},
     search::SearchOptions,
     ui::{self, Tone},
 };
@@ -106,28 +106,14 @@ pub struct UpdateReport {
 
 fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(
-        idx.root.as_os_str().as_bytes(),
+        path_bytes(&idx.root),
         &idx.filters.exclude_dirs,
         idx.filters
             .exclude_paths
             .iter()
-            .map(|p| p.as_os_str().as_bytes())
+            .map(|p| path_bytes(p))
             .collect::<Vec<_>>(),
     ))?)
-}
-
-fn stamp(metadata: &fs::Metadata) -> Vec<u8> {
-    [
-        metadata.dev(),
-        metadata.ino(),
-        metadata.mtime() as u64,
-        metadata.mtime_nsec() as u64,
-        metadata.ctime() as u64,
-        metadata.ctime_nsec() as u64,
-    ]
-    .into_iter()
-    .flat_map(u64::to_le_bytes)
-    .collect()
 }
 
 #[derive(Clone)]
@@ -397,7 +383,7 @@ impl FreshPostings {
     }
 
     // Test the encoder/spill boundary separately from filesystem traversal.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn add(&mut self, connection: &Connection, lists: HashMap<u32, Vec<u64>>) -> Result<()> {
         for (gram, ids) in lists {
             for id in ids {
@@ -733,7 +719,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         .optional()?;
     if stored_root
         .as_deref()
-        .is_some_and(|root| root != idx.root.as_os_str().as_bytes())
+        .is_some_and(|root| root != path_bytes(&idx.root).as_ref())
     {
         bail!("index root changed; use a new database path");
     }
@@ -769,8 +755,11 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     };
     // Root itself is an indexed record, but never a traversal child.
     if !existing {
-        let root = idx.root.as_os_str().as_bytes();
-        transaction.execute("INSERT INTO meta(key,value) VALUES ('root',?)", [root])?;
+        let root = path_bytes(&idx.root);
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES ('root',?)",
+            [root.as_ref()],
+        )?;
         let mut postings = batch.directory(&[]);
         let mut data = root.to_vec();
         data.push(0);
@@ -799,7 +788,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         let previous: Option<(i64, Vec<u8>)> = if existing {
             transaction
                 .prepare_cached("SELECT id,stamp FROM directories WHERE path=?")?
-                .query_row([directory.as_os_str().as_bytes()], |r| {
+                .query_row([path_bytes(&directory).as_ref()], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })
                 .optional()?
@@ -811,7 +800,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         } else {
             transaction
                 .prepare_cached("INSERT INTO directories(path,stamp) VALUES (?,?)")?
-                .execute(params![directory.as_os_str().as_bytes(), &before])?;
+                .execute(params![path_bytes(&directory).as_ref(), &before])?;
             transaction.last_insert_rowid()
         };
         if let Some(start) = sql_start {
@@ -829,7 +818,8 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                 children
                     .into_iter()
                     .rev()
-                    .map(|p| directory.join(std::ffi::OsString::from_vec(p))),
+                    .map(|p| os_string(p).map(|name| directory.join(name)))
+                    .collect::<Result<Vec<_>>>()?,
             );
             report.reused += 1;
             report.scan_elapsed += scan_start.elapsed();
@@ -862,7 +852,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             }
             // Hash accumulation avoids a tree lookup for every filename gram.
             // Sort only the final unique keys before writing SQLite pages.
-            let mut prefix = directory.as_os_str().as_bytes().to_vec();
+            let mut prefix = path_bytes(&directory).to_vec();
             if !prefix.ends_with(b"/") {
                 prefix.push(b'/');
             }
@@ -885,7 +875,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                 {
                     continue;
                 }
-                let name = name.as_bytes();
+                let name = name.as_encoded_bytes();
                 data.extend_from_slice(name);
                 data.push(0);
                 names += 1;
@@ -996,7 +986,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         Vec::new()
     };
     for (id, path) in old_directories {
-        let path = Path::new(std::ffi::OsStr::from_bytes(&path));
+        let path = path_from_bytes(&path)?;
         if path.starts_with(scan_root) && !visited.contains(&id) {
             clear_postings(&transaction, id)?;
             transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
@@ -1034,7 +1024,6 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
 }
 
 use std::io::IsTerminal;
-use std::os::unix::ffi::OsStringExt;
 
 pub struct Query {
     matcher: crate::matching::Query,
@@ -1052,7 +1041,7 @@ impl Query {
             for pattern in &options.patterns {
                 let mut run = Vec::new();
                 let mut in_class = false;
-                for &byte in pattern.as_bytes() {
+                for &byte in normalize(pattern.as_encoded_bytes()).iter() {
                     if byte == b'[' {
                         candidates.extend(grams(&run));
                         run.clear();
@@ -1293,7 +1282,10 @@ impl BlockReader {
         }
         let directory: i64 = row.get(1)?;
         for name in decoded[..size - 1].split(|&b| b == 0) {
-            if name.is_empty() || (directory != 0 && name.contains(&b'/')) {
+            if name.is_empty()
+                || (directory != 0
+                    && (name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))))
+            {
                 bail!("corrupt filename block: invalid basename");
             }
         }
@@ -1325,6 +1317,6 @@ impl BlockReader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/unit/native.rs"]
 mod tests;

@@ -1,5 +1,9 @@
 use super::*;
 use crate::config::Filters;
+use std::os::unix::{
+    ffi::{OsStrExt, OsStringExt},
+    fs::MetadataExt,
+};
 
 struct Fixture {
     _workspace: PathBuf,

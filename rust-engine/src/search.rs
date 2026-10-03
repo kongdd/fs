@@ -1,14 +1,20 @@
 use std::{
-    ffi::{OsStr, OsString},
-    io::{self, BufRead, BufReader, BufWriter, Write},
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    ffi::OsString,
+    io::{self, BufWriter, Write},
     path::{Component, Path, PathBuf},
+};
+
+use crate::platform::path_from_bytes;
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
+use serde::Serialize;
+#[cfg(unix)]
+use std::{
+    io::{BufRead, BufReader},
     process::{Command, Stdio},
     thread,
 };
-
-use anyhow::{Context, Result, bail};
-use serde::Serialize;
 
 use crate::config::{Config, IndexConfig};
 
@@ -168,12 +174,12 @@ pub(crate) fn visit_paths_until(
         let mut written = 0;
         for idx in &indexes {
             let complete = crate::native::visit(idx, &query, |path| {
-                if is_excluded(path, &indexes)
-                    || !matches_selection(path, scope.as_deref(), &options.extensions)
+                if is_excluded(path, &indexes)?
+                    || !matches_selection(path, scope.as_deref(), &options.extensions)?
                 {
                     return Ok(true);
                 }
-                if options.existing && !Path::new(OsStr::from_bytes(path)).try_exists()? {
+                if options.existing && !path_from_bytes(path)?.try_exists()? {
                     return Ok(true);
                 }
                 if skipped < options.offset {
@@ -190,6 +196,20 @@ pub(crate) fn visit_paths_until(
         }
         return Ok(());
     }
+    #[cfg(unix)]
+    return visit_plocate(cfg, options, &indexes, scope.as_deref(), visit);
+    #[cfg(windows)]
+    bail!("plocate databases are unsupported on Windows; select Rust indexes");
+}
+
+#[cfg(unix)]
+fn visit_plocate(
+    cfg: &Config,
+    options: &SearchOptions,
+    indexes: &[&IndexConfig],
+    scope: Option<&Path>,
+    mut visit: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<()> {
     let has_filters = indexes.iter().any(|idx| {
         !idx.filters.exclude_extensions.is_empty() || !idx.filters.exclude_files.is_empty()
     });
@@ -201,16 +221,16 @@ pub(crate) fn visit_paths_until(
     if options.ignore_case && !options.locate {
         cmd.env("LC_ALL", "C");
     }
-    for idx in &indexes {
+    for idx in indexes {
         // -d accepts a colon-separated list with backslash escaping.
         let mut database = Vec::new();
-        for &byte in idx.database.as_os_str().as_bytes() {
+        for &byte in idx.database.as_os_str().as_encoded_bytes() {
             if matches!(byte, b':' | b'\\') {
                 database.push(b'\\');
             }
             database.push(byte);
         }
-        cmd.arg("-d").arg(OsString::from_vec(database));
+        cmd.arg("-d").arg(crate::platform::os_string(database)?);
     }
     if options.ignore_case {
         cmd.arg("-i");
@@ -269,8 +289,8 @@ pub(crate) fn visit_paths_until(
                 buf.pop();
             }
             if buf.is_empty()
-                || (has_filters && is_excluded(&buf, &indexes))
-                || !matches_selection(&buf, scope.as_deref(), &options.extensions)
+                || (has_filters && is_excluded(&buf, indexes)?)
+                || !matches_selection(&buf, scope, &options.extensions)?
             {
                 continue;
             }
@@ -328,20 +348,20 @@ fn resolve_scope(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> bool {
-    let path = Path::new(OsStr::from_bytes(path));
-    scope.is_none_or(|root| path.starts_with(root))
+fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> Result<bool> {
+    let path = path_from_bytes(path)?;
+    Ok(scope.is_none_or(|root| path.starts_with(root))
         && (extensions.is_empty()
             || path.extension().is_some_and(|ext| {
                 extensions.iter().any(|wanted| {
-                    ext.as_bytes()
+                    ext.as_encoded_bytes()
                         .eq_ignore_ascii_case(wanted.trim_start_matches('.').as_bytes())
                 })
-            }))
+            })))
 }
 
-fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
-    let path_obj = Path::new(OsStr::from_bytes(path));
+fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> Result<bool> {
+    let path_obj = path_from_bytes(path)?;
 
     // A result should belong to exactly one configured root. Longest-prefix matching
     // handles nested roots deterministically.
@@ -355,17 +375,17 @@ fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
         }
     }
 
-    owner.is_some_and(|idx| {
+    Ok(owner.is_some_and(|idx| {
         path_obj.file_name().is_some_and(|name| {
-            idx.filters
-                .exclude_files
-                .iter()
-                .any(|blocked| name.as_bytes().eq_ignore_ascii_case(blocked.as_bytes()))
+            idx.filters.exclude_files.iter().any(|blocked| {
+                name.as_encoded_bytes()
+                    .eq_ignore_ascii_case(blocked.as_bytes())
+            })
         }) || path_obj.extension().is_some_and(|ext| {
             idx.filters.exclude_extensions.iter().any(|blocked| {
-                ext.as_bytes()
+                ext.as_encoded_bytes()
                     .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
             })
         })
-    })
+    }))
 }

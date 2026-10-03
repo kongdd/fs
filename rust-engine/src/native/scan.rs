@@ -2,7 +2,6 @@
 use std::{
     ffi::OsString,
     fs, mem,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender},
     thread::{self, JoinHandle},
@@ -207,7 +206,7 @@ fn scan_tree(
                     children.push(child);
                 }
             }
-            bytes += name.as_bytes().len() + mem::size_of::<Entry>();
+            bytes += name.as_encoded_bytes().len() + mem::size_of::<Entry>();
             entries.push((name, is_dir));
             entry_count += 1;
             if entries.len() >= BATCH_ENTRIES || bytes >= BATCH_BYTES {

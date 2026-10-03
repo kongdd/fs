@@ -21,7 +21,7 @@ use search::SearchOptions;
     about = "Everything-style byte-safe NAS search with plocate and Rust"
 )]
 struct Cli {
-    /// Config file. Defaults to $NASFIND_CONFIG, ~/.config/nasfind/config.toml, then /etc/nasfind/config.toml.
+    /// Config file. Defaults to NASFIND_CONFIG, ~/.config/nasfind/config.toml, then the system config.
     #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(long, global = true)]
         no_progress: bool,
         /// Index engine. plocate uses updatedb; Rust is the experimental native backend.
-        #[arg(long, global = true, value_enum, default_value_t = IndexEngine::Plocate)]
+        #[arg(long, global = true, value_enum, default_value_t = default_engine())]
         engine: IndexEngine,
     },
 
@@ -78,6 +78,14 @@ enum IndexAction {
     Update { names: Vec<String> },
     /// Initialize missing databases only; leave existing databases unchanged.
     Init { names: Vec<String> },
+}
+
+fn default_engine() -> IndexEngine {
+    if cfg!(target_os = "linux") {
+        IndexEngine::Plocate
+    } else {
+        IndexEngine::Rust
+    }
 }
 
 fn main() {
@@ -209,8 +217,12 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     println!("indexes: {}", cfg.index.len());
     let mut legacy = false;
     for idx in &cfg.index {
-        // Missing indexes use updatedb by default; validate every existing DB.
-        legacy |= !idx.database.is_file() || !native::is_native(&idx.database)?;
+        // Validate every existing DB; missing indexes follow the platform default.
+        legacy |= if idx.database.is_file() {
+            !native::is_native(&idx.database)?
+        } else {
+            matches!(default_engine(), IndexEngine::Plocate)
+        };
     }
     if legacy {
         check_command(&cfg.tools.plocate, "--version")?;
@@ -260,12 +272,12 @@ fn check_command(program: &str, version_flag: &str) -> Result<()> {
 }
 
 fn expand_tilde(path: &str) -> Result<PathBuf> {
-    if path == "~" || path.starts_with("~/") {
-        let home = env::var("HOME").context("HOME is not set")?;
+    if path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\")) {
+        let home = nasfind::platform::home_dir().context("home directory is not set")?;
         if path == "~" {
-            return Ok(PathBuf::from(home));
+            return Ok(home);
         }
-        return Ok(PathBuf::from(home).join(&path[2..]));
+        return Ok(home.join(&path[2..]));
     }
     Ok(PathBuf::from(path))
 }

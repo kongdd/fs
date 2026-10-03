@@ -2,7 +2,6 @@
 use crate::search::SearchOptions;
 use anyhow::{Context, Result, bail};
 use regex::bytes::{Regex, RegexBuilder};
-use std::os::unix::ffi::OsStrExt;
 
 pub struct Query {
     matchers: Vec<Matcher>,
@@ -17,7 +16,12 @@ impl Query {
     pub fn new(options: &SearchOptions) -> Result<Self> {
         let mut matchers = Vec::new();
         for pattern in &options.patterns {
-            let bytes = pattern.as_bytes();
+            let raw = pattern.as_encoded_bytes();
+            let bytes = if options.regex {
+                std::borrow::Cow::Borrowed(raw)
+            } else {
+                crate::platform::normalize(raw)
+            };
             if options.regex || bytes.iter().any(|b| matches!(b, b'*' | b'?' | b'[')) {
                 let expression = if options.regex {
                     pattern
@@ -25,7 +29,7 @@ impl Query {
                         .context("regex patterns must be UTF-8")?
                         .to_owned()
                 } else {
-                    glob_regex(bytes)?
+                    glob_regex(&bytes)?
                 };
                 matchers.push(Matcher::Regex(
                     RegexBuilder::new(&expression)

@@ -1,11 +1,12 @@
 //! Everything-style expression filtering over byte-safe backend candidates.
+use crate::platform::{normalize, os_string};
 use crate::{
     config::Config,
     matching::Query,
     search::{SearchOptions, visit_paths_until},
 };
 use anyhow::{Result, bail};
-use std::{collections::HashSet, ffi::OsString, os::unix::ffi::OsStringExt};
+use std::{collections::HashSet, ffi::OsString};
 
 #[derive(Debug, PartialEq)]
 enum Token {
@@ -17,10 +18,9 @@ enum Token {
 }
 
 fn tokens(args: &[OsString]) -> Result<Vec<Token>> {
-    use std::os::unix::ffi::OsStrExt;
     let input = args
         .iter()
-        .map(|s| s.as_bytes())
+        .map(|s| s.as_encoded_bytes())
         .collect::<Vec<_>>()
         .join(&b' ');
     let mut out = Vec::new();
@@ -195,7 +195,10 @@ impl Parser<'_> {
     }
     fn term(&self, mut word: Vec<u8>, literal: bool) -> Result<Expr> {
         let mut regex = false;
-        let mut basename = !self.options.match_path && !word.contains(&b'/');
+        let mut basename = !self.options.match_path
+            && !word
+                .iter()
+                .any(|&b| b == b'/' || (cfg!(windows) && b == b'\\'));
         if !literal {
             if let Some(value) = word.strip_prefix(b"ext:") {
                 let extensions = value
@@ -228,10 +231,13 @@ impl Parser<'_> {
         let anchor = if regex {
             None
         } else {
-            anchor(&word).map(|bytes| (OsString::from_vec(bytes), basename))
+            word = normalize(&word).into_owned();
+            anchor(&word)
+                .map(|bytes| os_string(bytes).map(|pattern| (pattern, basename)))
+                .transpose()?
         };
         let query = Query::new(&SearchOptions {
-            patterns: vec![OsString::from_vec(word)],
+            patterns: vec![os_string(word)?],
             basename,
             ignore_case: !self.options.case_sensitive,
             regex,

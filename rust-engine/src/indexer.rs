@@ -1,6 +1,5 @@
 use std::{
     fs,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -12,6 +11,9 @@ use crate::{
     ui::{self, Tone},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
 #[path = "../../src/indexer.rs"]
 mod plocate;
 
@@ -23,7 +25,10 @@ pub fn build_indexes(
     native: bool,
 ) -> Result<()> {
     if !native {
+        #[cfg(unix)]
         return plocate::build_indexes(cfg, names, folders, progress);
+        #[cfg(windows)]
+        bail!("plocate is unavailable on Windows; use --engine rust");
     }
     if folders.is_empty() {
         for idx in cfg.select(names)? {
@@ -110,12 +115,14 @@ fn lock_database(database: &Path) -> Result<fs::File> {
     }
     let mut path = database.as_os_str().to_os_string();
     path.push(".lock");
-    let lock = fs::OpenOptions::new()
+    let mut options = fs::OpenOptions::new();
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
         .open(path)?;
     lock.try_lock()
         .with_context(|| format!("database is already being updated: {}", database.display()))?;
@@ -131,7 +138,10 @@ impl Workspace {
             .parent()
             .context("database has no parent")?
             .join(format!(".nasfind-{}-{nonce}", std::process::id()));
-        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        let builder = &mut fs::DirBuilder::new();
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder.create(&path)?;
         Ok(Self(path))
     }
 }

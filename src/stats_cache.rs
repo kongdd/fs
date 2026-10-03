@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs,
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
     time::{Duration, Instant},
 };
@@ -10,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{Config, Counts, Rank, StatsOptions};
+use crate::platform::{file_identity, path_bytes};
 
 pub(super) struct Cached {
     pub(super) id: i64,
@@ -124,7 +124,7 @@ fn intern_directory(
     if let Some(&id) = dictionary.get(path) {
         return Ok(id);
     }
-    let parent = if super::is_root(path) && path != b"/" {
+    let parent = if super::is_root(path) && path != b"/" && path.iter().all(|&b| b == b'/') {
         Some(b"/".as_slice())
     } else {
         super::parent_path(path).filter(|parent| *parent != path)
@@ -151,18 +151,19 @@ pub(super) fn fingerprint(cfg: &Config, indexes: &[String]) -> Result<(String, V
                 idx.name
             )
         })?;
+        let (modified, nanos, identity) = file_identity(&metadata);
         sources.push((
-            idx.root.as_os_str().as_bytes(),
-            idx.database.as_os_str().as_bytes(),
+            path_bytes(&idx.root),
+            path_bytes(&idx.database),
             metadata.len(),
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-            metadata.ino(),
+            modified,
+            nanos,
+            identity,
             &idx.filters.exclude_dirs,
             idx.filters
                 .exclude_paths
                 .iter()
-                .map(|path| path.as_os_str().as_bytes())
+                .map(|path| path_bytes(path))
                 .collect::<Vec<_>>(),
             &idx.filters.exclude_extensions,
             &idx.filters.exclude_files,
@@ -295,8 +296,8 @@ pub(super) fn total(connection: &Connection, cached: &Cached, root: Option<&Path
                     WHERE c.selection=?1 AND d.path_hash=?2 AND d.path=?3",
                 params![
                     cached.id,
-                    path_hash(root.as_os_str().as_bytes()),
-                    root.as_os_str().as_bytes()
+                    path_hash(&path_bytes(root)),
+                    path_bytes(root).as_ref()
                 ],
                 |row| row.get(0),
             )
@@ -329,7 +330,8 @@ pub(super) fn ranked(
         })
     };
     let rows = if let Some(root) = root {
-        let root = root.as_os_str().as_bytes();
+        let bytes = path_bytes(root);
+        let root = bytes.as_ref();
         // Integer parent links find descendants without repeating path strings in indexes.
         let sql = format!(
             "WITH RECURSIVE subtree(id) AS (

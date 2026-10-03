@@ -5,7 +5,7 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 PROJECT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="${NASFIND_CONFIG:-$PROJECT/examples/config.toml}"
+CONFIG="${NASFIND_CONFIG:-$PROJECT/examples/config_nas.toml}"
 
 nasfind --config "$CONFIG" doctor
 nasfind --config "$CONFIG" index update --no-progress

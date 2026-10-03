@@ -12,3 +12,6 @@ node_modules/
 /UI/.env
 /UI/.env.local
 /UI/.env.*.local
+
+*.json
+*lock*

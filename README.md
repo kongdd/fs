@@ -24,7 +24,7 @@ export NASFIND_CONFIG="$HOME/.config/nasfind/config.toml"
 首次使用执行 `nasfind init`，然后编辑 `~/.config/nasfind/config.toml`，设置要索引的目录及数据库位置。数据库应放在扫描目录之外。已有配置不必重新初始化。
 
 - `examples/config.example.toml`：通用配置模板。
-- `examples/config.toml`：保留的本地 NAS 配置。
+- `examples/config_nas.toml`：保留的本地 NAS 配置。
 - 不需要搜索的具体路径写在对应的 `[[index]]` 的 `exclude_paths` 中。
 
 配置好后，下面的命令都不需要传配置文件。

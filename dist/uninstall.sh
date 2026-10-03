@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-PREFIX=${PREFIX:-/usr/local}
-rm -f "$PREFIX/bin/nasfind"
-echo "removed $PREFIX/bin/nasfind"
+PREFIX=${PREFIX:-"$HOME/.local"}
+rm -f "$PREFIX/bin/fs"
+echo "removed $PREFIX/bin/fs"
 echo "configuration and databases were left untouched"

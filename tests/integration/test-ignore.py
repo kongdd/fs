@@ -6,8 +6,8 @@ import subprocess
 import sys
 import tempfile
 
-binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/nasfind").resolve())
-with tempfile.TemporaryDirectory(prefix="nasfind-ignore-") as temp:
+binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/fs").resolve())
+with tempfile.TemporaryDirectory(prefix="fs-ignore-") as temp:
     base = Path(temp)
     root = base / "data"
     ignored = root / "cache with spaces"

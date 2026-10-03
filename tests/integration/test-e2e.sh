@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nasfind-e2e.XXXXXX")
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fs-e2e.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/research/node_modules" "$ROOT/research/cache with spaces" "$ROOT/archive/node_modules" "$ROOT/archive/cache with spaces" "$ROOT/research/private" "$ROOT/archive/private"
 touch "$ROOT/research/soil_moisture.nc"
@@ -38,18 +38,23 @@ exclude_paths = ["cache with spaces"]
 EOF2
 
 # This suite exercises plocate and legacy locate semantics; Everything has its own suite.
-REAL_BIN=$(readlink -f "${1:-target/release/nasfind}")
+REAL_BIN=$(readlink -f "${1:-target/release/fs}")
 mkdir -p "$HOME/.cache"
-WRAPPER_DIR=$(mktemp -d "$HOME/.cache/nasfind-legacy.XXXXXX")
+WRAPPER_DIR=$(mktemp -d "$HOME/.cache/fs-legacy.XXXXXX")
 trap 'rm -rf "$ROOT" "$WRAPPER_DIR"' EXIT
-BIN="$WRAPPER_DIR/legacy-nasfind"
+BIN="$WRAPPER_DIR/legacy-fs"
 cat > "$BIN" <<EOF_WRAPPER
 #!/usr/bin/env bash
 position=0
 for argument in "\$@"; do
     case "\$argument" in
-        index) exec "$REAL_BIN" "\$@" --engine plocate ;;
-        search) exec "$REAL_BIN" "\${@:1:\$position}" search --locate "\${@:\$((position + 2))}" ;;
+        index|updatedb)
+            for option in "\$@"; do
+                if [[ "\$option" == --engine* ]]; then exec "$REAL_BIN" "\$@"; fi
+            done
+            exec "$REAL_BIN" "\$@" --engine plocate ;;
+
+        search|locate) exec "$REAL_BIN" "\${@:1:\$position}" search --locate "\${@:\$((position + 2))}" ;;
         doctor|stats|init) exec "$REAL_BIN" "\$@" ;;
     esac
     position=\$((position + 1))
@@ -105,7 +110,7 @@ assert b'[update]' in updated.stderr and b'estimated total' in updated.stderr
 import pty, tempfile
 cache = pathlib.Path.home() / '.cache'
 cache.mkdir(exist_ok=True)
-with tempfile.TemporaryDirectory(prefix='nasfind-progress-', dir=cache) as temporary:
+with tempfile.TemporaryDirectory(prefix='fs-progress-', dir=cache) as temporary:
     fixture = pathlib.Path(temporary)
     locate = fixture / 'plocate'
     locate.write_text('#!/usr/bin/env python3\nprint(100)\n')
@@ -232,7 +237,7 @@ assert search("kept_sibling") == (str(sibling / "kept_sibling.nc") + "\n").encod
 assert search("unscanned_pending") == b""
 assert search("discard_dependency") == b""
 assert (base / "research.db").stat().st_mode == permissions
-assert not list(base.glob(".nasfind-*"))
+assert not list(base.glob(".fs-*"))
 
 # Unsupported newline names and failed builders cannot replace the old main DB.
 original = (base / "research.db").read_bytes()
@@ -335,7 +340,7 @@ assert {row["path"] for row in json.loads(personal("search", "--json", "my_"))} 
 
 # The packaged benchmark records normal updates, subtree merges and query latency.
 benchmark = base / "benchmark.json"
-measured = subprocess.run([sys.executable, "scripts/benchmark.py", "--nasfind", binary, "--config", str(default_config), "--index", "personal", "--query", "my_", "--runs", "3", "--limit", "0", "--update", "--folder", str(own / "python"), "--output", str(benchmark)], capture_output=True, timeout=30)
+measured = subprocess.run([sys.executable, "scripts/benchmarks/plocate.py", "--fs", binary, "--config", str(default_config), "--index", "personal", "--query", "my_", "--runs", "3", "--limit", "0", "--update", "--folder", str(own / "python"), "--output", str(benchmark)], capture_output=True, timeout=30)
 assert measured.returncode == 0, measured.stderr
 report = json.loads(benchmark.read_text())
 assert len(report["updates"]) == 3
@@ -378,7 +383,7 @@ assert [line.split(None, 1) for line in lines] == [
 assert b'Total: 5 unique indexed paths' in ranked.stderr
 # Native stats inherits the config lookup without --config.
 inherited = subprocess.run([binary, 'stats', '-d', 'archive', '-n3', str(rank_root)],
-                           capture_output=True, env={**os.environ, 'NASFIND_CONFIG': config}, timeout=10)
+                           capture_output=True, env={**os.environ, 'FS_CONFIG': config}, timeout=10)
 assert inherited.returncode == 0, inherited.stderr
 assert inherited.stdout == ranked.stdout
 for recursive in ['true', 'false']:
@@ -422,7 +427,7 @@ assert changed.returncode == 0, changed.stderr
 assert b'Total: 6 unique' in changed.stderr and b'building stats cache' in changed.stderr
 
 # A cached query never calls plocate or checks whether the indexed root exists.
-with tempfile.TemporaryDirectory(prefix='nasfind-stats-backend-', dir=cache) as temporary:
+with tempfile.TemporaryDirectory(prefix='fs-stats-backend-', dir=cache) as temporary:
     backend = pathlib.Path(temporary) / 'plocate'
     backend.write_text('#!/bin/sh\nexec plocate "$@"\n')
     backend.chmod(0o755)

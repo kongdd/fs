@@ -1,0 +1,9 @@
+[Unit]
+Description=Update fs indexes
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fs --config /etc/fs/config.toml updatedb --no-progress
+Nice=10
+IOSchedulingClass=idle

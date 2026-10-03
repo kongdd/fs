@@ -1,17 +1,19 @@
 .PHONY: test check e2e package
+TARGET ?= $(shell rustc -vV | awk '/^host:/ {print $$2}')
 
 test:
-	cargo test --all-targets
+	cargo test --locked --workspace --all-targets
 
 check:
 	cargo fmt --all -- --check
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test --all-targets
+	cargo clippy --locked --workspace --all-targets -- -D warnings
+	$(MAKE) test
 
 e2e:
-	cargo build --release
-	python3 tests/integration/test-everything.py target/release/nasfind
-	bash tests/integration/test-e2e.sh
+	cargo build --locked --release --bin fs
+	python3 tests/integration/test-native.py target/release/fs
+	python3 tests/integration/test-everything.py target/release/fs
 
 package:
-	bash scripts/package.sh
+	cargo build --locked --release --bin fs --target $(TARGET)
+	python3 scripts/release/package.py $(TARGET)

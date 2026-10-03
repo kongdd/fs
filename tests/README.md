@@ -1,19 +1,25 @@
-# 测试目录
+# 测试
 
-- `unit/`：Rust 单元测试，通过源模块的 `#[path]` 引入，以测试内部实现；源文件不包含测试函数。
-- `integration/`：对可执行文件进行端到端验证，测试数据与数据库均在独立临时目录内，不改动现有 NAS 索引。
-  - `test-everything.py`：Everything 式检索与真实 plocate 后端、退役索引保护。
-  - `test-e2e.sh`：plocate/updatedb 后端及统计、配置、安装等回归。
+所有测试集中在本目录；各 crate 通过 `#[path]` 加载对应单元测试。
 
-从仓库根目录运行：
-
-```bash
-make check
-make e2e
+```sh
+cargo test --locked --workspace --all-targets
+cargo build --locked --bin fs
+python3 tests/integration/test-native.py target/debug/fs
+python3 tests/integration/test-everything.py target/debug/fs
 ```
 
-`make e2e` 需要 Python 3、plocate、updatedb、plocate-build 和 GNU sort。可先运行 `python3 scripts/setup-tools.py` 准备工具。
+Windows 可执行文件为 `fs.exe`。Everything 测试默认使用原生引擎；PATH 中有 plocate/updatedb 时额外验证同一组表达式。
 
-- `ui/`：TypeScript 查询、API 数据约定及界面交互测试（Vitest + jsdom），执行 `npm --prefix UI ci && npm --prefix UI test`。
+Linux plocate 专属回归：
 
-性能基准脚本保留在 `scripts/benchmark*.py`，不属于回归测试。
+```sh
+python3 tests/integration/test-ignore.py target/debug/fs
+bash tests/integration/test-e2e.sh target/debug/fs
+```
+
+- `unit/core/`：配置、路径、匹配和终端输出。
+- `unit/updatedb/`：扫描、编码、增量更新和 plocate 建库。
+- `unit/locate/`：CLI、表达式、过滤、忽略和统计。
+- `portable.rs`：跨平台索引/查询、离线根目录、Windows 路径。
+- `ui/`：保留的 UI 测试，暂未在 CI 启用。

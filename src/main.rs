@@ -1,6 +1,7 @@
 mod config;
 mod database;
 mod everything;
+mod ignore;
 mod indexer;
 mod matching;
 mod search;
@@ -68,6 +69,12 @@ enum Commands {
 
     /// Rank directories by indexed-entry count without scanning the filesystem.
     Stats(stats::StatsOptions),
+
+    /// Manage directories hidden at query time, without rebuilding indexes.
+    Ignore {
+        #[command(subcommand)]
+        action: ignore::IgnoreAction,
+    },
 
     /// Check configuration and external dependencies.
     Doctor,
@@ -139,13 +146,18 @@ fn run() -> Result<()> {
             stats::refresh(&cfg, &names)
                 .context("index databases updated, but statistics refresh failed")
         }
-        Commands::Search(options) => {
-            let (cfg, _) = Config::load(cli.config.as_deref())?;
+        Commands::Search(mut options) => {
+            let (cfg, path) = Config::load(cli.config.as_deref())?;
+            options.ignored_dirs = ignore::load(&path)?;
             search::search(&cfg, &options)
         }
         Commands::Stats(options) => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
             stats::stats(&cfg, &options)
+        }
+        Commands::Ignore { action } => {
+            let (_, path) = Config::load(cli.config.as_deref())?;
+            ignore::run(&path, action)
         }
         Commands::Doctor => doctor(cli.config.as_deref()),
     }
@@ -155,7 +167,9 @@ fn normalize_implicit_search(mut args: Vec<OsString>) -> Vec<OsString> {
     if args.len() < 2 {
         return args;
     }
-    const COMMANDS: &[&str] = &["init", "index", "search", "stats", "doctor", "help"];
+    const COMMANDS: &[&str] = &[
+        "init", "index", "search", "stats", "ignore", "doctor", "help",
+    ];
 
     // Skip global options that may precede the command. This keeps both
     // `nasfind soil` and `nasfind --config cfg.toml soil` convenient.

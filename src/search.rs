@@ -44,6 +44,15 @@ pub struct SearchOptions {
     /// Include only these extensions (ASCII case-insensitive). Repeat or use commas.
     #[arg(long = "ext", value_delimiter = ',')]
     pub extensions: Vec<String>,
+    /// Only inferred directories: filenames without a nonempty extension (no filesystem access).
+    #[arg(long, conflicts_with = "files")]
+    pub dirs: bool,
+    /// Only inferred files: filenames with a nonempty extension (no filesystem access).
+    #[arg(long, conflicts_with = "dirs")]
+    pub files: bool,
+    /// Directory names from the query-time ignore sidecar, not indexing rules.
+    #[arg(skip)]
+    pub ignored_dirs: Vec<String>,
     /// Restrict results to this directory subtree, without accessing the filesystem.
     #[arg(long)]
     pub path: Option<PathBuf>,
@@ -53,6 +62,9 @@ pub struct SearchOptions {
     /// Stop after this many matches after filtering and offset.
     #[arg(short = 'l', long)]
     pub limit: Option<usize>,
+    /// Map NAS output paths to /mnt/{z,x,y,o} (CMIP6, GitHub, Researches, CUG-hydro).
+    #[arg(long)]
+    pub mnt: bool,
     /// Write a JSON array of paths.
     #[arg(long, conflicts_with = "null")]
     pub json: bool,
@@ -76,6 +88,8 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
         bail!("--json and --null cannot be used together");
     }
     let mut write_path = |path: &[u8]| {
+        let mapped = options.mnt.then(|| map_mount_path(path)).flatten();
+        let path = mapped.as_deref().unwrap_or(path);
         if options.json {
             output.write_all(if written == 0 { b"[" } else { b"," })?;
             let path = String::from_utf8_lossy(path);
@@ -109,6 +123,25 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     Ok(())
 }
 
+// Output-only mapping preserves raw bytes and matches complete path components.
+fn map_mount_path(path: &[u8]) -> Option<Vec<u8>> {
+    for (source, target) in [
+        (b"/volume1/CMIP6".as_slice(), b"/mnt/z".as_slice()),
+        (b"/volume2/GitHub".as_slice(), b"/mnt/x".as_slice()),
+        (b"/volume1/Researches".as_slice(), b"/mnt/y".as_slice()),
+        (b"/volume1/CUG-hydro".as_slice(), b"/mnt/o".as_slice()),
+    ] {
+        if let Some(rest) = path.strip_prefix(source)
+            && (rest.is_empty() || rest.starts_with(b"/"))
+        {
+            let mut mapped = target.to_vec();
+            mapped.extend_from_slice(rest);
+            return Some(mapped);
+        }
+    }
+    None
+}
+
 // Share byte-safe streaming, filters and child cleanup with stats.
 pub fn visit_paths(
     cfg: &Config,
@@ -136,6 +169,9 @@ pub(crate) fn visit_paths_until(
         bail!("--json and --null cannot be used together");
     }
 
+    if options.dirs && options.files {
+        bail!("--dirs and --files cannot be used together");
+    }
     let scope = options.path.as_deref().map(resolve_scope).transpose()?;
     if options
         .extensions
@@ -159,10 +195,17 @@ pub(crate) fn visit_paths_until(
         crate::database::reject_retired_index(&idx.database)?;
     }
     let has_filters = indexes.iter().any(|idx| {
-        !idx.filters.exclude_extensions.is_empty() || !idx.filters.exclude_files.is_empty()
+        !idx.filters.exclude_extensions.is_empty()
+            || !idx.filters.exclude_files.is_empty()
+            || !idx.filters.exclude_paths.is_empty()
     });
-    let post_filter =
-        has_filters || scope.is_some() || !options.extensions.is_empty() || options.offset > 0;
+    let post_filter = has_filters
+        || scope.is_some()
+        || !options.extensions.is_empty()
+        || options.dirs
+        || options.files
+        || !options.ignored_dirs.is_empty()
+        || options.offset > 0;
 
     let mut cmd = Command::new(&cfg.tools.plocate);
     cmd.env_remove("LOCATE_PATH");
@@ -239,6 +282,8 @@ pub(crate) fn visit_paths_until(
             if buf.is_empty()
                 || (has_filters && is_excluded(&buf, &indexes))
                 || !matches_selection(&buf, scope.as_deref(), &options.extensions)
+                || !matches_kind(&buf, options.dirs, options.files)
+                || is_ignored_dir(&buf, &options.ignored_dirs)
             {
                 continue;
             }
@@ -277,7 +322,7 @@ pub(crate) fn visit_paths_until(
 }
 
 // Lexical normalization only: queries must work even for deleted/offline paths.
-fn resolve_scope(path: &Path) -> Result<PathBuf> {
+pub(crate) fn resolve_scope(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -294,6 +339,19 @@ fn resolve_scope(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+fn is_ignored_dir(path: &[u8], names: &[String]) -> bool {
+    Path::new(OsStr::from_bytes(path)).components().any(|component| {
+        matches!(component, Component::Normal(name) if names.iter().any(|blocked| name.as_bytes() == blocked.as_bytes()))
+    })
+}
+
+fn matches_kind(path: &[u8], dirs: bool, files: bool) -> bool {
+    let is_file = Path::new(OsStr::from_bytes(path))
+        .extension()
+        .is_some_and(|ext| !ext.is_empty());
+    (!dirs || !is_file) && (!files || is_file)
 }
 
 fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> bool {
@@ -324,17 +382,22 @@ fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
     }
 
     owner.is_some_and(|idx| {
-        path_obj.file_name().is_some_and(|name| {
-            idx.filters
-                .exclude_files
-                .iter()
-                .any(|blocked| name.as_bytes().eq_ignore_ascii_case(blocked.as_bytes()))
-        }) || path_obj.extension().is_some_and(|ext| {
-            idx.filters.exclude_extensions.iter().any(|blocked| {
-                ext.as_bytes()
-                    .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
+        idx.filters
+            .exclude_paths
+            .iter()
+            .any(|root| path_obj.starts_with(root))
+            || path_obj.file_name().is_some_and(|name| {
+                idx.filters
+                    .exclude_files
+                    .iter()
+                    .any(|blocked| name.as_bytes().eq_ignore_ascii_case(blocked.as_bytes()))
             })
-        })
+            || path_obj.extension().is_some_and(|ext| {
+                idx.filters.exclude_extensions.iter().any(|blocked| {
+                    ext.as_bytes()
+                        .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
+                })
+            })
     })
 }
 

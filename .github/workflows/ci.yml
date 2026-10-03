@@ -12,6 +12,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: UI/package-lock.json
+      - name: Install UI dependencies
+        run: npm --prefix UI ci
+      - name: Test UI
+        run: npm --prefix UI test
+      - name: Build UI
+        run: npm --prefix UI run build
   test:
     runs-on: ubuntu-latest
     steps:

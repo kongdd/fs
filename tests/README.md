@@ -14,4 +14,6 @@ make e2e
 
 `make e2e` 需要 Python 3、plocate、updatedb、plocate-build 和 GNU sort。可先运行 `python3 scripts/setup-tools.py` 准备工具。
 
+- `ui/`：TypeScript 查询、API 数据约定及界面交互测试（Vitest + jsdom），执行 `npm --prefix UI ci && npm --prefix UI test`。
+
 性能基准脚本保留在 `scripts/benchmark*.py`，不属于回归测试。

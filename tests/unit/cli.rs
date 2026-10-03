@@ -75,6 +75,62 @@ fn stats_is_a_command_with_explicit_boolean_and_positive_top() {
 }
 
 #[test]
+fn ignore_commands_are_not_implicit_searches() {
+    for args in [
+        vec![
+            "nasfind",
+            "ignore",
+            "add",
+            "cache",
+            "node_modules",
+            "cache with spaces",
+        ],
+        vec!["nasfind", "--config", "cfg.toml", "ignore", "list"],
+        vec!["nasfind", "ignore", "rm", "cache"],
+    ] {
+        let normalized = normalize_implicit_search(args.into_iter().map(OsString::from).collect());
+        let cli = Cli::try_parse_from(normalized).unwrap();
+        assert!(matches!(cli.command, Commands::Ignore { .. }));
+    }
+    let cli = Cli::try_parse_from(["nasfind", "ignore", "add", "cache", "node_modules"]).unwrap();
+    assert!(matches!(cli.command, Commands::Ignore {
+        action: ignore::IgnoreAction::Add { dirs }
+    } if dirs == ["cache", "node_modules"]));
+    assert!(Cli::try_parse_from(["nasfind", "ignore", "add"]).is_err());
+    let cli = Cli::try_parse_from(["nasfind", "ignore", "rm", "cache", "node_modules"]).unwrap();
+    assert!(matches!(cli.command, Commands::Ignore {
+        action: ignore::IgnoreAction::Rm { dirs }
+    } if dirs == ["cache", "node_modules"]));
+    assert!(Cli::try_parse_from(["nasfind", "ignore", "rm"]).is_err());
+}
+
+#[test]
+fn implicit_search_accepts_mount_mapping() {
+    let cli = Cli::try_parse_from(normalize_implicit_search(
+        ["nasfind", "--mnt", "--files", "soil"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+    ))
+    .unwrap();
+    assert!(matches!(cli.command, Commands::Search(options) if options.mnt && options.files));
+}
+
+#[test]
+fn search_kind_flags_are_mutually_exclusive() {
+    for flag in ["--dirs", "--files"] {
+        let args = ["nasfind", flag, "soil"];
+        let cli = Cli::try_parse_from(normalize_implicit_search(
+            args.into_iter().map(OsString::from).collect(),
+        ))
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Search(options)
+            if options.dirs == (flag == "--dirs") && options.files == (flag == "--files")));
+    }
+    assert!(Cli::try_parse_from(["nasfind", "search", "--dirs", "--files", "soil"]).is_err());
+}
+
+#[test]
 fn implicit_search_accepts_options() {
     for options in [
         vec!["-i", "soil"],

@@ -7,3 +7,8 @@ __pycache__/
 /.pi/
 /dist-out/
 backup
+node_modules/
+/UI/dist/
+/UI/.env
+/UI/.env.local
+/UI/.env.*.local

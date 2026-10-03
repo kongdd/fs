@@ -49,6 +49,13 @@ with tempfile.TemporaryDirectory(prefix='nasfind-native-e2e-') as temporary:
     assert run('search', '--json', 'nothing_matches').stdout == b'[]\n'
     assert json.loads(run('search', '--json', 'soil').stdout) == [{'path': str(root / 'soil_ERA5.nc')}]
     assert run('search', '-0', 'soil', 'nc').stdout == os.fsencode(root / 'soil_ERA5.nc') + b'\0'
+    # Default Everything syntax shares exact matching with the native planner.
+    assert set(run('<soil | rain> ext:nc', '-0').stdout.split(b'\0')[:-1]) == {
+        os.fsencode(root / 'soil_ERA5.nc'), os.fsencode(root / 'nested/rain.nc'),
+    }
+    soil = run('soil', '-0').stdout.split(b'\0')[:-1]
+    assert run('soil | soil_ERA5', '-0', '--offset', '1', '-l', '1').stdout == soil[1] + b'\0'
+    assert run('path:nested ext:nc !renamed', '-0').stdout == os.fsencode(root / 'nested/rain.nc') + b'\0'
     assert run('search', '--path', str(root) + '-other', '*').stdout == b''
     all_paths = run('search', '-0', '*').stdout.split(b'\0')[:-1]
     assert run('search', '-0', '--offset', '1', '-l', '2', '*').stdout.split(b'\0')[:-1] == all_paths[1:3]

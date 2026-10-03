@@ -10,7 +10,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use regex::bytes::{Regex, RegexBuilder};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
@@ -1038,46 +1037,22 @@ use std::io::IsTerminal;
 use std::os::unix::ffi::OsStringExt;
 
 pub struct Query {
-    matchers: Vec<Matcher>,
+    matcher: crate::matching::Query,
     grams: Vec<u32>,
     basename: bool,
-    ignore_case: bool,
-}
-
-enum Matcher {
-    Literal(Vec<u8>),
-    Regex(Regex),
 }
 
 impl Query {
     pub fn new(options: &SearchOptions) -> Result<Self> {
-        let mut matchers = Vec::new();
+        let matcher = crate::matching::Query::new(options)?;
         let mut candidates = Vec::new();
-        for pattern in &options.patterns {
-            let bytes = pattern.as_bytes();
-            if options.regex {
-                let expression = pattern.to_str().context("regex patterns must be UTF-8")?;
-                matchers.push(Matcher::Regex(
-                    RegexBuilder::new(expression)
-                        .unicode(false)
-                        .case_insensitive(options.ignore_case)
-                        .build()
-                        .context("invalid regular expression")?,
-                ));
-                // Regex alternatives/quantifiers aren't necessarily mandatory
-                // literals. Full scan rather than an unsound candidate shortcut.
-            } else if bytes.iter().any(|b| matches!(b, b'*' | b'?' | b'[')) {
-                let expression = glob_regex(bytes)?;
-                matchers.push(Matcher::Regex(
-                    RegexBuilder::new(&expression)
-                        .unicode(false)
-                        .case_insensitive(options.ignore_case)
-                        .build()?,
-                ));
-                // Only runs outside character classes are mandatory.
+        // Regex alternatives/quantifiers need a full scan. For globs, only
+        // literal runs outside character classes are mandatory.
+        if !options.regex {
+            for pattern in &options.patterns {
                 let mut run = Vec::new();
                 let mut in_class = false;
-                for &byte in bytes {
+                for &byte in pattern.as_bytes() {
                     if byte == b'[' {
                         candidates.extend(grams(&run));
                         run.clear();
@@ -1094,81 +1069,20 @@ impl Query {
                     }
                 }
                 candidates.extend(grams(&run));
-            } else {
-                candidates.extend(grams(bytes));
-                matchers.push(Matcher::Literal(bytes.to_vec()));
             }
         }
         candidates.sort_unstable();
         candidates.dedup();
         Ok(Self {
-            matchers,
+            matcher,
             grams: candidates,
             basename: options.basename,
-            ignore_case: options.ignore_case,
         })
     }
 
     pub(crate) fn matches(&self, path: &[u8]) -> bool {
-        let value = if self.basename {
-            path.rsplit(|b| *b == b'/').next().unwrap_or(path)
-        } else {
-            path
-        };
-        self.matchers.iter().all(|matcher| match matcher {
-            Matcher::Literal(needle) => {
-                needle.is_empty()
-                    || value.windows(needle.len()).any(|window| {
-                        if self.ignore_case {
-                            window.eq_ignore_ascii_case(needle)
-                        } else {
-                            window == needle
-                        }
-                    })
-            }
-            Matcher::Regex(regex) => regex.is_match(value),
-        })
+        self.matcher.matches(path)
     }
-}
-
-// Glob matching is anchored like plocate; non-glob text is substring matching.
-fn glob_regex(pattern: &[u8]) -> Result<String> {
-    let mut result = String::from("(?s)^");
-    let mut i = 0;
-    while i < pattern.len() {
-        match pattern[i] {
-            b'*' => result.push_str(".*"),
-            b'?' => result.push('.'),
-            b'[' => {
-                result.push('[');
-                i += 1;
-                if i == pattern.len() {
-                    bail!("unclosed glob character class");
-                }
-                if matches!(pattern[i], b'!' | b'^') {
-                    result.push('^');
-                    i += 1;
-                }
-                let start = i;
-                while i < pattern.len() && pattern[i] != b']' {
-                    if pattern[i] == b'-' {
-                        result.push('-');
-                    } else {
-                        result.push_str(&format!("\\x{:02x}", pattern[i]));
-                    }
-                    i += 1;
-                }
-                if i == pattern.len() || i == start {
-                    bail!("invalid glob character class");
-                }
-                result.push(']');
-            }
-            byte => result.push_str(&format!("\\x{byte:02x}")),
-        }
-        i += 1;
-    }
-    result.push('$');
-    Ok(result)
 }
 
 fn intersect(left: &[u64], right: &[u64]) -> Vec<u64> {

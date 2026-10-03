@@ -34,7 +34,7 @@ pub struct StatsOptions {
 
 pub fn stats(cfg: &Config, options: &StatsOptions) -> Result<()> {
     for idx in cfg.select(&options.indexes)? {
-        crate::database::reject_retired_index(&idx.database)?;
+        crate::native::is_native(&idx.database)?;
     }
     let root = options.path.as_deref().map(absolute_path).transpose()?;
     let mut connection = cache::open(cfg)?;

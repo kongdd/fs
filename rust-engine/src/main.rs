@@ -1,17 +1,4 @@
-#[path = "../../src/config.rs"]
-mod config;
-mod database {
-    pub fn reject_retired_index(path: &std::path::Path) -> anyhow::Result<()> {
-        super::native::is_native(path).map(|_| ())
-    }
-}
-mod everything;
-mod indexer;
-mod native;
-mod search;
-mod stats;
-#[path = "../../src/ui.rs"]
-mod ui;
+use nasfind::{config, indexer, native, search, stats, ui};
 
 use std::{
     env,
@@ -220,19 +207,11 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     let (cfg, path) = Config::load(config_path)?;
     println!("config: {}", path.display());
     println!("indexes: {}", cfg.index.len());
-    let legacy = cfg
-        .index
-        .iter()
-        .map(|idx| {
-            if idx.database.is_file() {
-                native::is_native(&idx.database)
-            } else {
-                Ok(false)
-            } // Missing indexes use updatedb by default.
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .any(|native| !native);
+    let mut legacy = false;
+    for idx in &cfg.index {
+        // Missing indexes use updatedb by default; validate every existing DB.
+        legacy |= !idx.database.is_file() || !native::is_native(&idx.database)?;
+    }
     if legacy {
         check_command(&cfg.tools.plocate, "--version")?;
         check_command(&cfg.tools.updatedb, "--version")?;

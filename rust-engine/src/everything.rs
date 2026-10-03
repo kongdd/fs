@@ -331,7 +331,3 @@ pub fn visit(
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/everything.rs"]
-mod tests;

@@ -20,7 +20,9 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4e465231;
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
+const BLOCK_SIZE: usize = 32;
+const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn is_native(path: &Path) -> Result<bool> {
     let mut header = [0; 100];
@@ -60,15 +62,12 @@ fn schema(connection: &Connection) -> Result<()> {
         PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version={VERSION};
         CREATE TABLE meta(key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
         CREATE TABLE directories(id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, stamp BLOB NOT NULL);
-        CREATE TABLE entries(id INTEGER PRIMARY KEY, name BLOB NOT NULL, directory INTEGER NOT NULL, kind INTEGER NOT NULL);
-        CREATE VIEW paths AS SELECT e.id,e.directory,e.kind,
-            CASE WHEN e.directory=0 THEN e.name
-                 ELSE CAST((CASE WHEN substr(d.path,-1,1)=X'2f' THEN d.path ELSE d.path || '/' END) || e.name AS BLOB)
-            END AS path
-            FROM entries e LEFT JOIN directories d ON e.directory=d.id;
-        CREATE TABLE postings(gram INTEGER NOT NULL, directory INTEGER NOT NULL, data BLOB NOT NULL, n INTEGER NOT NULL,
-            PRIMARY KEY(gram,directory)) WITHOUT ROWID;
-        CREATE TABLE frequencies(gram INTEGER PRIMARY KEY, n INTEGER NOT NULL);
+        CREATE TABLE blocks(id INTEGER PRIMARY KEY, directory INTEGER NOT NULL,
+            data BLOB NOT NULL, size INTEGER NOT NULL, n INTEGER NOT NULL);
+        CREATE TABLE children(directory INTEGER NOT NULL, name BLOB NOT NULL,
+            PRIMARY KEY(directory,name)) WITHOUT ROWID;
+        CREATE TABLE postings(gram INTEGER PRIMARY KEY, data BLOB NOT NULL, n INTEGER NOT NULL);
+        CREATE TABLE directory_grams(directory INTEGER PRIMARY KEY, data BLOB NOT NULL);
     "))?;
     Ok(())
 }
@@ -214,11 +213,119 @@ fn unpack(data: &[u8]) -> Result<Vec<u64>> {
     Ok(ids)
 }
 
+// Postings refer to blocks, not filenames. Grams from different names may
+// intersect; exact matching after decompression removes these false positives.
+fn write_block(
+    connection: &Connection,
+    directory: i64,
+    data: &[u8],
+    names: usize,
+    prefix: &[u8],
+    postings: &mut HashMap<u32, Vec<u64>>,
+    compressor: &mut zstd::bulk::Compressor<'_>,
+) -> Result<()> {
+    if data.len() > MAX_BLOCK_BYTES {
+        bail!("filename block exceeds size limit");
+    }
+    let compressed = compressor.compress(data)?;
+    connection
+        .prepare_cached("INSERT INTO blocks(directory,data,size,n) VALUES (?,?,?,?)")?
+        .execute(params![
+            directory,
+            compressed,
+            data.len() as i64,
+            names as i64
+        ])?;
+    let id = connection.last_insert_rowid() as u64;
+    let mut suffix = Vec::new();
+    for name in data[..data.len() - 1].split(|&b| b == 0) {
+        suffix.clear();
+        suffix.extend_from_slice(&prefix[prefix.len().saturating_sub(2)..]);
+        suffix.extend_from_slice(name);
+        for gram in trigram_keys(&suffix) {
+            let ids = postings.entry(gram).or_default();
+            if ids.last() != Some(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct PostingBatch {
+    lists: HashMap<u32, Vec<u64>>,
+    count: usize,
+}
+
+impl PostingBatch {
+    fn add(
+        &mut self,
+        connection: &Connection,
+        directory: i64,
+        lists: HashMap<u32, Vec<u64>>,
+    ) -> Result<()> {
+        let mut keys: Vec<_> = lists.keys().map(|&gram| u64::from(gram)).collect();
+        keys.sort_unstable();
+        connection
+            .prepare_cached("INSERT INTO directory_grams(directory,data) VALUES (?,?)")?
+            .execute(params![directory, pack(&keys)])?;
+        for (gram, ids) in lists {
+            self.count += ids.len();
+            self.lists.entry(gram).or_default().extend(ids);
+        }
+        // Bound cross-directory accumulation; this is not a total RSS limit.
+        if self.count >= 262_144 {
+            self.flush(connection)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self, connection: &Connection) -> Result<()> {
+        let mut lists: Vec<_> = self.lists.drain().collect();
+        lists.sort_unstable_by_key(|(gram, _)| *gram);
+        let mut select = connection.prepare_cached("SELECT data FROM postings WHERE gram=?")?;
+        let mut insert = connection.prepare_cached("INSERT INTO postings(gram,data,n) VALUES (?,?,?) ON CONFLICT(gram) DO UPDATE SET data=excluded.data,n=excluded.n")?;
+        for (gram, mut ids) in lists {
+            if let Some(data) = select
+                .query_row([gram], |r| r.get::<_, Vec<u8>>(0))
+                .optional()?
+            {
+                let mut previous = unpack(&data)?;
+                previous.append(&mut ids);
+                ids = previous;
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            insert.execute(params![gram, pack(&ids), ids.len() as i64])?;
+        }
+        self.count = 0;
+        Ok(())
+    }
+}
+
 fn clear_postings(connection: &Connection, directory: i64) -> Result<()> {
-    connection.execute("UPDATE frequencies SET n=n-COALESCE((SELECT n FROM postings WHERE gram=frequencies.gram AND directory=?1),0)
-        WHERE gram IN (SELECT gram FROM postings WHERE directory=?1)", [directory])?;
-    connection.execute("DELETE FROM frequencies WHERE n=0 AND gram IN (SELECT gram FROM postings WHERE directory=?)", [directory])?;
-    connection.execute("DELETE FROM postings WHERE directory=?", [directory])?;
+    let data: Vec<u8> = connection
+        .prepare_cached("SELECT data FROM directory_grams WHERE directory=?")?
+        .query_row([directory], |r| r.get(0))?;
+    let old_ids = connection
+        .prepare_cached("SELECT id FROM blocks WHERE directory=? ORDER BY id")?
+        .query_map([directory], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut select = connection.prepare_cached("SELECT data FROM postings WHERE gram=?")?;
+    let mut update = connection.prepare_cached("UPDATE postings SET data=?,n=? WHERE gram=?")?;
+    let mut delete = connection.prepare_cached("DELETE FROM postings WHERE gram=?")?;
+    for gram in unpack(&data)? {
+        let data: Vec<u8> = select.query_row([gram as i64], |r| r.get(0))?;
+        let mut ids = unpack(&data)?;
+        ids.retain(|&id| old_ids.binary_search(&(id as i64)).is_err());
+        if ids.is_empty() {
+            delete.execute([gram as i64])?;
+        } else {
+            update.execute(params![pack(&ids), ids.len() as i64, gram as i64])?;
+        }
+    }
+    connection.execute("DELETE FROM directory_grams WHERE directory=?", [directory])?;
     Ok(())
 }
 
@@ -251,6 +358,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             idx.database.display()
         );
     }
+    let mut compressor = zstd::bulk::Compressor::new(3)?;
     let mut connection = Connection::open(&idx.database)?;
     connection.busy_timeout(Duration::from_secs(30))?;
     // DELETE journaling keeps each committed snapshot in the DB file itself;
@@ -293,21 +401,24 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     let label: String = idx.name.chars().take(12).collect();
     let label = ui::paint(&label, Tone::Info, ui::stderr_color());
     let mut last = Instant::now();
+    let mut batch = PostingBatch::default();
     // Root itself is an indexed record, but never a traversal child.
     if !existing {
         let root = idx.root.as_os_str().as_bytes();
         transaction.execute("INSERT INTO meta(key,value) VALUES ('root',?)", [root])?;
-        transaction.execute(
-            "INSERT INTO entries(name,directory,kind) VALUES (?,0,1)",
-            [root],
+        let mut postings = HashMap::new();
+        let mut data = root.to_vec();
+        data.push(0);
+        write_block(
+            &transaction,
+            0,
+            &data,
+            1,
+            &[],
+            &mut postings,
+            &mut compressor,
         )?;
-        let root_id = transaction.last_insert_rowid() as u64;
-        for gram in grams(root) {
-            transaction.execute(
-                "INSERT INTO postings(gram,directory,data,n) VALUES (?,0,?,1)",
-                params![gram, pack(&[root_id])],
-            )?;
-        }
+        batch.add(&transaction, 0, postings)?;
     }
     while let Some(directory) = pending.pop() {
         let scan_start = Instant::now();
@@ -343,16 +454,14 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         }
         if !force && previous.as_ref().is_some_and(|(_, old)| old == &before) {
             let children = transaction
-                .prepare_cached(
-                    "SELECT path FROM paths WHERE directory=? AND kind=1 ORDER BY path",
-                )?
+                .prepare_cached("SELECT name FROM children WHERE directory=? ORDER BY name")?
                 .query_map([id], |r| r.get::<_, Vec<u8>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             pending.extend(
                 children
                     .into_iter()
                     .rev()
-                    .map(|p| PathBuf::from(std::ffi::OsString::from_vec(p))),
+                    .map(|p| directory.join(std::ffi::OsString::from_vec(p))),
             );
             report.reused += 1;
             report.scan_elapsed += scan_start.elapsed();
@@ -374,7 +483,8 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             let index_start = Instant::now();
             if previous.is_some() {
                 clear_postings(&transaction, id)?;
-                transaction.execute("DELETE FROM entries WHERE directory=?", [id])?;
+                transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
+                transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
             }
             // Hash accumulation avoids a tree lookup for every filename gram.
             // Sort only the final unique keys before writing SQLite pages.
@@ -384,10 +494,9 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                 prefix.push(b'/');
             }
             let common_grams = grams(&prefix);
-            let mut entry_count = 0_i64;
-            let mut entry_insert = transaction
-                .prepare_cached("INSERT INTO entries(name,directory,kind) VALUES (?,?,?)")?;
-            let mut suffix = Vec::new();
+            let mut block_ids = Vec::new();
+            let mut data = Vec::new();
+            let mut names = 0;
             for (name, is_dir) in children {
                 // Keep basenames like updatedb: full paths are only necessary
                 // for traversal or explicit path exclusions, not every file.
@@ -403,56 +512,50 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                     continue;
                 }
                 let name = name.as_bytes();
-                entry_insert.execute(params![name, id, i64::from(is_dir)])?;
-                let entry_id = transaction.last_insert_rowid() as u64;
-                entry_count += 1;
-                // Include the prefix/name boundary without re-tokenizing the
-                // entire common directory prefix for every entry.
-                suffix.clear();
-                suffix.extend_from_slice(&prefix[prefix.len().saturating_sub(2)..]);
-                suffix.extend_from_slice(name);
-                for gram in trigram_keys(&suffix) {
-                    if common_grams.binary_search(&gram).is_err() {
-                        let ids = postings.entry(gram).or_default();
-                        // IDs are monotonic. Last-ID comparison deduplicates
-                        // repeated trigrams without sorting each filename.
-                        if ids.last() != Some(&entry_id) {
-                            ids.push(entry_id);
-                        }
-                    }
+                data.extend_from_slice(name);
+                data.push(0);
+                names += 1;
+                if names == BLOCK_SIZE {
+                    write_block(
+                        &transaction,
+                        id,
+                        &data,
+                        names,
+                        &prefix,
+                        &mut postings,
+                        &mut compressor,
+                    )?;
+                    data.clear();
+                    names = 0;
+                    block_ids.push(transaction.last_insert_rowid() as u64);
                 }
                 if is_dir {
+                    transaction
+                        .prepare_cached("INSERT INTO children(directory,name) VALUES (?,?)")?
+                        .execute(params![id, name])?;
                     pending.push(path.context("directory path missing")?);
                 }
             }
-            drop(entry_insert);
-            {
-                let mut insert = transaction.prepare_cached(
-                    "INSERT INTO postings(gram,directory,data,n) VALUES (?,?,?,?)",
+            if names > 0 {
+                write_block(
+                    &transaction,
+                    id,
+                    &data,
+                    names,
+                    &prefix,
+                    &mut postings,
+                    &mut compressor,
                 )?;
-                let mut frequency = if existing {
-                    Some(transaction.prepare_cached("INSERT INTO frequencies(gram,n) VALUES (?,?) ON CONFLICT(gram) DO UPDATE SET n=n+excluded.n")?)
-                } else {
-                    None
-                };
-                // Empty posting data denotes every immediate entry.
-                if entry_count > 0 {
-                    for gram in common_grams {
-                        insert.execute(params![gram, id, &[] as &[u8], entry_count])?;
-                        if let Some(frequency) = &mut frequency {
-                            frequency.execute(params![gram, entry_count])?;
-                        }
-                    }
+                block_ids.push(transaction.last_insert_rowid() as u64);
+            }
+            if !block_ids.is_empty() {
+                for gram in common_grams {
+                    postings.insert(gram, block_ids.clone());
                 }
-                let mut postings: Vec<_> = postings.into_iter().collect();
-                postings.sort_unstable_by_key(|(gram, _)| *gram);
-                for (gram, ids) in postings {
-                    let n = ids.len() as i64;
-                    insert.execute(params![gram, id, pack(&ids), n])?;
-                    if let Some(frequency) = &mut frequency {
-                        frequency.execute(params![gram, n])?;
-                    }
-                }
+            }
+            batch.add(&transaction, id, postings)?;
+            if existing {
+                batch.flush(&transaction)?;
             }
             let after = stamp(&directory_metadata(&directory, &idx.root)?);
             if before != after {
@@ -482,14 +585,9 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         }
     }
     let finalize_start = Instant::now();
+    batch.flush(&transaction)?;
     if !existing {
-        // Bulk build: one ordered aggregation, then secondary-index creation.
-        // Keep FULL durability and the same schema as incremental updates.
-        transaction.execute_batch(
-            "INSERT INTO frequencies SELECT gram,SUM(n) FROM postings GROUP BY gram;
-            CREATE INDEX directory_entries ON entries(directory,kind);
-            CREATE INDEX directory_postings ON postings(directory);",
-        )?;
+        transaction.execute_batch("CREATE INDEX directory_blocks ON blocks(directory);")?;
     }
     // Remove vanished subtrees only when updating an existing database.
     let old_directories = if existing {
@@ -504,15 +602,17 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         let path = Path::new(std::ffi::OsStr::from_bytes(&path));
         if path.starts_with(scan_root) && !visited.contains(&id) {
             clear_postings(&transaction, id)?;
-            transaction.execute("DELETE FROM entries WHERE directory=?", [id])?;
+            transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
+            transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
             transaction.execute("DELETE FROM directories WHERE id=?", [id])?;
         }
     }
     if force {
         transaction.execute("INSERT INTO meta(key,value) VALUES ('filters',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&key])?;
     }
-    report.entries =
-        transaction.query_row("SELECT count(*) FROM entries", [], |r| r.get::<_, i64>(0))? as u64;
+    report.entries = transaction.query_row("SELECT COALESCE(SUM(n),0) FROM blocks", [], |r| {
+        r.get::<_, i64>(0)
+    })? as u64;
     transaction.commit()?;
     report.finalize_elapsed = finalize_start.elapsed();
     drop(live_line);
@@ -702,9 +802,7 @@ pub fn visit(
     let mut ranked = Vec::new();
     for &gram in &query.grams {
         let n: Option<i64> = transaction
-            .query_row("SELECT n FROM frequencies WHERE gram=?", [gram], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT n FROM postings WHERE gram=?", [gram], |r| r.get(0))
             .optional()?;
         let Some(n) = n else {
             return Ok(true);
@@ -716,27 +814,10 @@ pub fn visit(
     // exact matching is always authoritative (trigrams admit false positives).
     let mut candidates: Option<Vec<u64>> = None;
     for (_, gram) in ranked.into_iter().take(6) {
-        let mut ids = Vec::new();
-        let mut statement =
-            transaction.prepare_cached("SELECT data,directory FROM postings WHERE gram=?")?;
-        let mut rows = statement.query([gram])?;
-        while let Some(row) = rows.next()? {
-            let data: Vec<u8> = row.get(0)?;
-            if data.is_empty() {
-                let directory: i64 = row.get(1)?;
-                ids.extend(
-                    transaction
-                        .prepare_cached("SELECT id FROM entries WHERE directory=? ORDER BY id")?
-                        .query_map([directory], |r| r.get::<_, i64>(0))?
-                        .collect::<rusqlite::Result<Vec<_>>>()?
-                        .into_iter()
-                        .map(|id| id as u64),
-                );
-            } else {
-                ids.extend(unpack(&data)?);
-            }
-        }
-        ids.sort_unstable();
+        let data: Vec<u8> = transaction
+            .prepare_cached("SELECT data FROM postings WHERE gram=?")?
+            .query_row([gram], |r| r.get(0))?;
+        let ids = unpack(&data)?;
         let previous_length = candidates.as_ref().map(Vec::len);
         candidates = Some(match candidates {
             Some(previous) => intersect(&previous, &ids),
@@ -753,13 +834,17 @@ pub fn visit(
             break; // Further intersections are unlikely to pay for their I/O.
         }
     }
-    let mut prefixes = HashMap::new();
-    let mut buffer = Vec::new();
+    let mut reader = BlockReader {
+        prefixes: HashMap::new(),
+        buffer: Vec::new(),
+        decoded: Vec::new(),
+        decompressor: zstd::bulk::Decompressor::new()?,
+    };
     if let Some(ids) = candidates {
         // Batch row lookups, keeping memory bounded and allowing limits to
         // stop after the first batch instead of materializing every path.
         let mut statement = transaction.prepare_cached(
-            "SELECT name,directory FROM entries WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id",
+            "SELECT data,directory,size,n FROM blocks WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id",
         )?;
         for chunk in ids.chunks(512) {
             if chunk.iter().any(|&id| id > i64::MAX as u64) {
@@ -770,14 +855,7 @@ pub fn visit(
             let mut count = 0;
             while let Some(row) = rows.next()? {
                 count += 1;
-                if !visit_row(
-                    row,
-                    &transaction,
-                    query,
-                    &mut prefixes,
-                    &mut buffer,
-                    &mut visitor,
-                )? {
+                if !reader.visit(row, &transaction, query, &mut visitor)? {
                     return Ok(false);
                 }
             }
@@ -787,17 +865,10 @@ pub fn visit(
         }
     } else {
         let mut statement =
-            transaction.prepare("SELECT name,directory FROM entries ORDER BY id")?;
+            transaction.prepare("SELECT data,directory,size,n FROM blocks ORDER BY id")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            if !visit_row(
-                row,
-                &transaction,
-                query,
-                &mut prefixes,
-                &mut buffer,
-                &mut visitor,
-            )? {
+            if !reader.visit(row, &transaction, query, &mut visitor)? {
                 return Ok(false);
             }
         }
@@ -805,37 +876,71 @@ pub fn visit(
     Ok(true)
 }
 
-fn visit_row(
-    row: &rusqlite::Row<'_>,
-    connection: &Connection,
-    query: &Query,
-    prefixes: &mut HashMap<i64, Vec<u8>>,
-    buffer: &mut Vec<u8>,
-    visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
-) -> Result<bool> {
-    let name = row.get_ref(0)?.as_blob()?;
-    if query.basename && !query.matches(name) {
-        return Ok(true);
-    }
-    let directory: i64 = row.get(1)?;
-    buffer.clear();
-    if directory != 0 {
-        if let std::collections::hash_map::Entry::Vacant(entry) = prefixes.entry(directory) {
-            entry.insert(
-                connection
-                    .prepare_cached("SELECT path FROM directories WHERE id=?")?
-                    .query_row([directory], |r| r.get(0))?,
-            );
+struct BlockReader {
+    prefixes: HashMap<i64, Vec<u8>>,
+    buffer: Vec<u8>,
+    decoded: Vec<u8>,
+    decompressor: zstd::bulk::Decompressor<'static>,
+}
+
+impl BlockReader {
+    fn visit(
+        &mut self,
+        row: &rusqlite::Row<'_>,
+        connection: &Connection,
+        query: &Query,
+        visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
+    ) -> Result<bool> {
+        let Self {
+            prefixes,
+            buffer,
+            decoded,
+            decompressor,
+        } = self;
+        let size = usize::try_from(row.get::<_, i64>(2)?)?;
+        let n = usize::try_from(row.get::<_, i64>(3)?)?;
+        if size == 0 || size > MAX_BLOCK_BYTES || n == 0 || n > BLOCK_SIZE {
+            bail!("corrupt filename block: invalid size or count");
         }
-        buffer.extend_from_slice(&prefixes[&directory]);
-        if !buffer.ends_with(b"/") {
-            buffer.push(b'/');
+        decoded.clear();
+        decoded.reserve(size);
+        let length = decompressor.decompress_to_buffer(row.get_ref(0)?.as_blob()?, decoded)?;
+        if length != size
+            || decoded.last() != Some(&0)
+            || decoded.iter().filter(|&&b| b == 0).count() != n
+        {
+            bail!("corrupt filename block: size or count mismatch");
         }
-    }
-    buffer.extend_from_slice(name);
-    if query.basename || query.matches(buffer) {
-        visitor(buffer)
-    } else {
+        let directory: i64 = row.get(1)?;
+        for name in decoded[..size - 1].split(|&b| b == 0) {
+            if name.is_empty() || (directory != 0 && name.contains(&b'/')) {
+                bail!("corrupt filename block: invalid basename");
+            }
+        }
+        if directory != 0
+            && let std::collections::hash_map::Entry::Vacant(entry) = prefixes.entry(directory)
+        {
+            let mut prefix: Vec<u8> = connection
+                .prepare_cached("SELECT path FROM directories WHERE id=?")?
+                .query_row([directory], |r| r.get(0))?;
+            if !prefix.ends_with(b"/") {
+                prefix.push(b'/');
+            }
+            entry.insert(prefix);
+        }
+        for name in decoded[..size - 1].split(|&b| b == 0) {
+            if query.basename && !query.matches(name) {
+                continue;
+            }
+            buffer.clear();
+            if directory != 0 {
+                buffer.extend_from_slice(&prefixes[&directory]);
+            }
+            buffer.extend_from_slice(name);
+            if (query.basename || query.matches(buffer)) && !visitor(buffer)? {
+                return Ok(false);
+            }
+        }
         Ok(true)
     }
 }

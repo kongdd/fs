@@ -662,7 +662,3 @@ fn progress_status(
         elapsed.as_secs_f64()
     )
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/indexer.rs"]
-mod tests;

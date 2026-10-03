@@ -55,7 +55,8 @@ def percentile(values, p):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--nasfind', default='target/release/nasfind')
+    parser.add_argument('--nasfind', default='rust-engine/target/release/nasfind')
+    parser.add_argument('--before', help='Compare this native baseline against --nasfind instead of plocate')
     parser.add_argument('--files', type=int, default=100000)
     parser.add_argument('--runs', type=int, default=21, help='One first sample + repeated timed samples')
     parser.add_argument('--warmup', type=int, default=3, help='Untimed-distribution warmups between first and repeated samples')
@@ -72,6 +73,7 @@ def main():
         GNU_TIME = candidate
     binary = str(pathlib.Path(args.nasfind).resolve())
     pathlib.Path(args.parent).mkdir(parents=True, exist_ok=True)
+    before = str(pathlib.Path(args.before).resolve()) if args.before else None
     report = {'platform': platform.platform(), 'files': args.files, 'runs': args.runs,
               'version': subprocess.check_output([binary, '--version'], text=True).strip(),
               'binary_sha256': hashlib.sha256(pathlib.Path(binary).read_bytes()).hexdigest(),
@@ -80,6 +82,9 @@ def main():
               'python': platform.python_version(), 'rss_tool': GNU_TIME,
               'note': 'Synthetic zero-byte files; both indexes built before querying. Repeated queries interleaved, alternating engine order. No caches cleared. P50/P95 exclude first sample and recorded warmups. CLI timings include startup and optional GNU time wrapper; index timings include stats refresh. GNU time RSS (KiB on Linux) is not simultaneous process-tree sum. RSS null if GNU time unavailable.',
               'engines': {}}
+    if before:
+        report['before_binary_sha256'] = hashlib.sha256(pathlib.Path(before).read_bytes()).hexdigest()
+        report['note'] = report['note'].replace('both indexes', 'both native versions')
 
     def save():
         pathlib.Path(args.output).write_text(json.dumps(report, indent=2) + '\n')
@@ -100,7 +105,7 @@ def main():
             path.touch()
             expected.append(os.fsencode(path))
         report['generation_seconds'] = time.perf_counter() - generation_start
-        engines = ['rust'] if args.native_only else ['rust', 'plocate']
+        engines = ['before', 'after'] if before else (['rust'] if args.native_only else ['rust', 'plocate'])
         commands = {}
         databases = {}
         for engine in engines:
@@ -109,13 +114,14 @@ def main():
             config = storage / 'config.toml'
             database = storage / 'index.db'
             config.write_text('[[index]]\nname="bench"\nroot=' + json.dumps(str(root)) + '\ndatabase=' + json.dumps(str(database)) + '\n')
-            command = [binary, '-c', str(config)]
+            command = [before if engine == 'before' else binary, '-c', str(config)]
             commands[engine] = command
             databases[engine] = database
             row = {'index': [], 'queries': {}}
             report['engines'][engine] = row
             for label in ['init', 'unchanged_update']:
-                sample, _ = measure(command + ['index', 'update', '--engine', engine, '--no-progress'])
+                backend = 'rust' if before else engine
+                sample, _ = measure(command + ['index', 'update', '--engine', backend, '--no-progress'])
                 row['index'].append({'kind': label, **sample})
                 print(engine, label, sample, flush=True)
             save()
@@ -125,7 +131,8 @@ def main():
         first.rename(renamed)
         current = [os.fsencode(renamed) if p == os.fsencode(first) else p for p in expected]
         for engine in engines:
-            sample, _ = measure(commands[engine] + ['index', 'update', '--engine', engine, '--no-progress'])
+            backend = 'rust' if before else engine
+            sample, _ = measure(commands[engine] + ['index', 'update', '--engine', backend, '--no-progress'])
             row = report['engines'][engine]
             row['index'].append({'kind': 'one_directory_changed', **sample})
             row['index_bytes'] = databases[engine].stat().st_size

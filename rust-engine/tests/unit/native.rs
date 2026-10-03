@@ -80,17 +80,19 @@ fn byte_safe_search_matches_reference_for_literals_globs_and_regex() {
     ] {
         fs::write(fixture.idx.root.join(name), b"").unwrap();
     }
-    let invalid = std::ffi::OsString::from_vec(b"bad_\xff.nc".to_vec());
+    // APFS rejects non-UTF-8 names; the codec test below still covers raw bytes.
+    let invalid = if cfg!(target_os = "macos") {
+        std::ffi::OsString::from("bad_apfs.nc")
+    } else {
+        std::ffi::OsString::from_vec(b"bad_\xff.nc".to_vec())
+    };
     fs::write(fixture.idx.root.join(invalid), b"").unwrap();
     update(&fixture.idx, None, false).unwrap();
-    let connection = open_read(&fixture.idx.database).unwrap();
-    let all = connection
-        .prepare("SELECT path FROM paths")
+    let mut all: Vec<_> = fs::read_dir(&fixture.idx.root)
         .unwrap()
-        .query_map([], |r| r.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
+        .map(|entry| entry.unwrap().path().as_os_str().as_bytes().to_vec())
+        .collect();
+    all.push(fixture.idx.root.as_os_str().as_bytes().to_vec());
     for (patterns, regex) in [
         (vec!["soil"], false),
         (vec!["SOIL"], false),
@@ -132,36 +134,43 @@ fn byte_safe_search_matches_reference_for_literals_globs_and_regex() {
 }
 
 #[test]
-fn bulk_build_creates_complete_indexes_and_deduplicated_frequencies() {
+fn bulk_build_creates_complete_indexes_and_deduplicated_postings() {
     let fixture = Fixture::new();
     for name in ["zzzzzz.nc", "ZZZzzz.txt", "aaaaaaa.dat"] {
         fs::write(fixture.idx.root.join(name), b"").unwrap();
     }
     update(&fixture.idx, None, false).unwrap();
-    let connection = open_read(&fixture.idx.database).unwrap();
-    let indexes: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('directory_entries','directory_postings')", [], |r| r.get(0)).unwrap();
-    assert_eq!(indexes, 2);
     let zzz = trigram_keys(b"zzz").next().unwrap();
-    let frequency: i64 = connection
-        .query_row("SELECT n FROM frequencies WHERE gram=?", [zzz], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(frequency, 2); // Repeated/folded grams counted once per entry.
-    let missing: i64 = connection.query_row("SELECT count(*) FROM (SELECT gram,SUM(n) FROM postings GROUP BY gram EXCEPT SELECT gram,n FROM frequencies)", [], |r| r.get(0)).unwrap();
-    let extra: i64 = connection.query_row("SELECT count(*) FROM (SELECT gram,n FROM frequencies EXCEPT SELECT gram,SUM(n) FROM postings GROUP BY gram)", [], |r| r.get(0)).unwrap();
-    assert_eq!((missing, extra), (0, 0));
-    drop(connection);
-    fs::remove_file(fixture.idx.root.join("zzzzzz.nc")).unwrap();
-    update(&fixture.idx, None, false).unwrap();
+    for removed in [false, true] {
+        if removed {
+            fs::remove_file(fixture.idx.root.join("zzzzzz.nc")).unwrap();
+            update(&fixture.idx, None, false).unwrap();
+        }
+        let connection = open_read(&fixture.idx.database).unwrap();
+        let indexed: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='directory_blocks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
+        let frequency: i64 = connection
+            .query_row("SELECT n FROM postings WHERE gram=?", [zzz], |r| r.get(0))
+            .unwrap();
+        assert_eq!(frequency, 1); // Repeated/folded grams counted once per block.
+        let mut statement = connection.prepare("SELECT data,n FROM postings").unwrap();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            assert_eq!(
+                unpack(row.get_ref(0).unwrap().as_blob().unwrap())
+                    .unwrap()
+                    .len(),
+                row.get::<_, i64>(1).unwrap() as usize
+            );
+        }
+    }
     assert_eq!(fixture.query(&["zzz"], true, true, false).len(), 1);
-    let connection = open_read(&fixture.idx.database).unwrap();
-    let frequency: i64 = connection
-        .query_row("SELECT n FROM frequencies WHERE gram=?", [zzz], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(frequency, 1);
 }
 
 #[test]
@@ -290,4 +299,159 @@ fn malformed_queries_fail_and_limits_stop_visiting() {
         .unwrap()
     );
     assert_eq!(count, 1);
+}
+
+#[test]
+fn blocks_cover_boundaries_and_never_combine_different_filenames() {
+    let fixture = Fixture::new();
+    for number in 0..65 {
+        fs::write(fixture.idx.root.join(format!("entry_{number:03}.nc")), b"").unwrap();
+    }
+    fs::write(fixture.idx.root.join("soil.txt"), b"").unwrap();
+    fs::write(fixture.idx.root.join("rain.csv"), b"").unwrap();
+    assert_eq!(update(&fixture.idx, None, false).unwrap().entries, 68);
+    let connection = open_read(&fixture.idx.database).unwrap();
+    let blocks: i64 = connection
+        .query_row("SELECT count(*) FROM blocks WHERE directory!=0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(blocks, 3);
+    drop(connection);
+    assert!(
+        fixture
+            .query(&["soil", "csv"], true, false, false)
+            .is_empty()
+    );
+    for number in [0, 31, 32, 63, 64] {
+        let name = format!("entry_{number:03}.nc");
+        assert_eq!(fixture.query(&[&name], true, false, false).len(), 1);
+        assert_eq!(
+            fixture
+                .query(&[&format!("files/{name}")], false, false, false)
+                .len(),
+            1
+        );
+    }
+    fs::remove_file(fixture.idx.root.join("entry_032.nc")).unwrap();
+    fs::rename(
+        fixture.idx.root.join("entry_064.nc"),
+        fixture.idx.root.join("renamed.nc"),
+    )
+    .unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    assert!(fixture.query(&["entry_032"], true, false, false).is_empty());
+    assert!(fixture.query(&["entry_064"], true, false, false).is_empty());
+    assert_eq!(fixture.query(&["renamed"], true, false, false).len(), 1);
+    assert_eq!(fixture.query(&["entry"], true, false, false).len(), 63);
+}
+
+#[test]
+fn block_codec_preserves_raw_bytes_and_rejects_corruption() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO directories(path,stamp) VALUES (?,?)",
+            params![b"/root", b""],
+        )
+        .unwrap();
+    let mut compressor = zstd::bulk::Compressor::new(3).unwrap();
+    let mut postings = HashMap::new();
+    let data = b"bad_\xff.nc\0line\nfile.txt\0";
+    write_block(
+        &connection,
+        1,
+        data,
+        2,
+        b"/root/",
+        &mut postings,
+        &mut compressor,
+    )
+    .unwrap();
+    let query = Query::new(&SearchOptions {
+        patterns: vec!["*".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut reader = BlockReader {
+        prefixes: HashMap::new(),
+        buffer: Vec::new(),
+        decoded: Vec::new(),
+        decompressor: zstd::bulk::Decompressor::new().unwrap(),
+    };
+    let mut read = || {
+        let mut found = Vec::new();
+        let mut statement = connection
+            .prepare("SELECT data,directory,size,n FROM blocks")
+            .unwrap();
+        let mut rows = statement.query([]).unwrap();
+        reader.visit(
+            rows.next().unwrap().unwrap(),
+            &connection,
+            &query,
+            &mut |path| {
+                found.push(path.to_vec());
+                Ok(true)
+            },
+        )?;
+        Ok::<_, anyhow::Error>(found)
+    };
+    assert_eq!(
+        read().unwrap(),
+        vec![
+            b"/root/bad_\xff.nc".to_vec(),
+            b"/root/line\nfile.txt".to_vec()
+        ]
+    );
+    for sql in [
+        "UPDATE blocks SET n=3",
+        "UPDATE blocks SET n=2,size=-1",
+        "UPDATE blocks SET size=4194305",
+        "UPDATE blocks SET size=1",
+        "UPDATE blocks SET size=25,data=X'ff'",
+    ] {
+        connection.execute_batch(sql).unwrap();
+        assert!(read().is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn posting_batch_flushes_and_merges_sorted_unique_ids() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    let mut batch = PostingBatch::default();
+    batch
+        .add(
+            &connection,
+            1,
+            HashMap::from([(123, (1..=262_144).collect())]),
+        )
+        .unwrap();
+    assert_eq!(batch.count, 0);
+    batch
+        .add(&connection, 2, HashMap::from([(123, vec![262_145])]))
+        .unwrap();
+    batch.flush(&connection).unwrap();
+    let (data, n): (Vec<u8>, i64) = connection
+        .query_row("SELECT data,n FROM postings WHERE gram=123", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(n, 262_145);
+    assert_eq!(unpack(&data).unwrap(), (1..=262_145).collect::<Vec<_>>());
+}
+
+#[test]
+fn old_schema_is_rejected_without_overwriting() {
+    let fixture = Fixture::new();
+    update(&fixture.idx, None, false).unwrap();
+    Connection::open(&fixture.idx.database)
+        .unwrap()
+        .execute_batch("PRAGMA user_version=1")
+        .unwrap();
+    let before = fs::read(&fixture.idx.database).unwrap();
+    assert!(is_native(&fixture.idx.database).is_err());
+    assert!(update(&fixture.idx, None, false).is_err());
+    assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
 }

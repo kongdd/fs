@@ -17,7 +17,8 @@ with tempfile.TemporaryDirectory(prefix='nasfind-native-e2e-') as temporary:
     names = ['soil_ERA5.nc', 'SOIL.csv', 'nested/rain.nc', 'nested/line\nfile.txt', '中文.nc', 'excluded/hidden.nc', 'ignore.tmp']
     for name in names:
         (root / name).touch()
-    invalid = os.fsencode(root) + b'/bad_\xff.nc'
+    # APFS disallows non-UTF-8 filenames; raw-byte codec coverage is in unit tests.
+    invalid = os.fsencode(root) + (b'/bad_apfs.nc' if sys.platform == 'darwin' else b'/bad_\xff.nc')
     with open(invalid, 'wb'):
         pass
     os.symlink(root, root / 'loop')

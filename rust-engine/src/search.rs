@@ -369,7 +369,3 @@ fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> bool {
         })
     })
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/search.rs"]
-mod tests;

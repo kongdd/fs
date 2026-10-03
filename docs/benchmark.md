@@ -72,4 +72,4 @@ python3 scripts/benchmark-everything.py --nasfind target/release/nasfind \
 
 发布包中使用 `--nasfind ./nasfind`。脚本在 `~/.cache` 创建并清理独立的合成文件目录和数据库，不更新现有索引。报告保存完整样本，并对查询结果进行参考集合校验；详见 [范围和实测说明](everything-search.md)。
 
-原实验性 Rust 建库实现、测试与历史性能报告保存在仓库的 `backup/rust-engine/`，不参与当前构建或打包。
+实验性 Rust 引擎、测试与性能报告保存在 `rust-engine/`，独立构建、不参与主程序打包；最新前后对照见[块级索引](../rust-engine/docs/chunk-index.md)。

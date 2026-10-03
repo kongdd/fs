@@ -1,4 +1,5 @@
 /target/
+/rust-engine/target/
 *.db
 .DS_Store
 @eaDir/
@@ -15,3 +16,8 @@ node_modules/
 
 *.json
 *lock*
+
+UI
+ui
+docs
+*.md

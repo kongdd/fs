@@ -1,4 +1,6 @@
-# Rust 原生文件名检索引擎
+# Rust 原生文件名检索引擎（v1 历史记录）
+
+当前 v2 的结构与构建方法见 [块级索引](chunk-index.md) 和 [实验引擎说明](../README.md)。以下 `entries`/`frequencies` 结构已被替代，命令只适用于独立实验 CLI。
 
 ## 使用与兼容
 

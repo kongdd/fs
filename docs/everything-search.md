@@ -1,6 +1,6 @@
 # Everything 式检索：当前范围与性能
 
-当前是核心语法子集，不是 Everything/ES 的完整复刻。默认由 updatedb 建库、plocate 提供候选，Rust 解析表达式、精确匹配、应用筛选、去重与分页。实验性 Rust 建库代码已备份到 `backup/rust-engine/`。主程序拒绝旧 SQLite/Rust 索引，需配置新 DB 路径再重新建库，不自动覆盖。
+当前是核心语法子集，不是 Everything/ES 的完整复刻。默认由 updatedb 建库、plocate 提供候选，Rust 解析表达式、精确匹配、应用筛选、去重与分页。实验性 Rust 建库在 `rust-engine/` 独立构建，不参与主程序编译。主程序拒绝旧 SQLite/Rust 索引，需配置新 DB 路径再重新建库，不自动覆盖。
 
 ## 已支持
 

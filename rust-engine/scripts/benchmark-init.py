@@ -20,7 +20,7 @@ spec.loader.exec_module(bench)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--before', required=True, help='Saved baseline executable')
-    parser.add_argument('--after', default='target/release/nasfind')
+    parser.add_argument('--after', default='rust-engine/target/release/nasfind')
     parser.add_argument('--files', type=int, default=100000)
     parser.add_argument('--per-directory', type=int, default=100)
     parser.add_argument('--runs', type=int, default=5)

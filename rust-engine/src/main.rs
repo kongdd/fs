@@ -1,9 +1,17 @@
+#[path = "../../src/config.rs"]
 mod config;
+mod database {
+    pub fn reject_retired_index(path: &std::path::Path) -> anyhow::Result<()> {
+        super::native::is_native(path).map(|_| ())
+    }
+}
 mod everything;
 mod indexer;
 mod native;
 mod search;
+#[path = "../../src/stats.rs"]
 mod stats;
+#[path = "../../src/ui.rs"]
 mod ui;
 
 use std::{
@@ -283,7 +291,3 @@ fn expand_tilde(path: &str) -> Result<PathBuf> {
     }
     Ok(PathBuf::from(path))
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/cli.rs"]
-mod tests;

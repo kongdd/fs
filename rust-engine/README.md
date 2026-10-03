@@ -1,14 +1,42 @@
-# Rust 原生索引备份（暂停使用）
+# Rust 实验索引（独立构建）
 
-此目录保存移出主程序的实验性 Rust 建库/索引后端，未提交、未删除用户数据库。
+借鉴 plocate 的 32 文件分块、zstd 和全局块级倒排。主程序仍使用 updatedb/plocate；此 crate 不进入主程序 CI 或发布包。
 
-- `src/native.rs`：SQLite 索引、扫描、增量更新、trigram posting 与原生查询实现。
-- `src/main.rs`、`indexer.rs`、`search.rs`、`everything.rs`：停用前的接入代码快照，仅作恢复/对照参考。
-- `tests/`：原生单元测试、端到端测试与双后端 Everything 测试快照。
-- `scripts/`：自建库性能对照脚本。
-- `docs/`：设计说明、性能报告、updatedb 学习记录及原始 JSON。
-- Cargo 文件：当时的依赖快照；rusqlite 在主程序中仍用于统计缓存，不能因暂停原生索引而移除。
+当前格式为 **schema v2**。v1 SQLite/Rust 库不迁移、不覆盖；请使用新数据库路径。完整设计、限制与实测见 [块级索引](docs/chunk-index.md)。其余设计与 Linux 性能文档为 v1 历史记录。
 
-这不是独立可构建的 crate，不参与主程序编译、CI 或打包。若继续研发，应审阅这些快照并重新接入，不要直接用旧 main/search/indexer 覆盖后续代码。
+```bash
+cargo build --release --manifest-path rust-engine/Cargo.toml
+cargo test --manifest-path rust-engine/Cargo.toml --lib
+python3 rust-engine/tests/integration/test-native.py rust-engine/target/release/nasfind
 
-主程序当前由 updatedb 建库、plocate 查询候选，Rust 保留 Everything 表达式和纯匹配逻辑（`src/matching.rs`）。既有 Rust/SQLite 索引被明确拒绝，不会静默覆盖；改用新 DB 路径后重新建库。
+rust-engine/target/release/nasfind -c /path/config.toml index update --engine rust
+rust-engine/target/release/nasfind -c /path/config.toml search soil
+```
+
+实验 CLI 使用隔离的旧接入代码与共享配置/统计模块，不等同于主程序全部新功能。库测试覆盖原生索引及共享匹配模块，CLI 行为由原生端到端测试覆盖。
+
+## 真实目录实测
+
+[cug-hydro NAS 实测](docs/cug-hydro-performance.md)：18.26 万条，包含建库、无变更更新、查询分位数、RSS 和 plocate 同机对照。只读源目录，临时索引位于扫描目录外。
+
+```bash
+python3 rust-engine/scripts/benchmark-real.py \
+  --root /volume1/CMIP6/GitHub/cug-hydro \
+  --output rust-engine/docs/cug-hydro-benchmark.json.txt
+# 无 plocate 时增加 --native-only；--parent 指定临时数据库所在目录。
+```
+
+## 合成语料性能复现
+
+优化前先保存旧实验二进制，再构建新版。基准使用独立临时目录，不修改已有 NAS 索引。
+
+```bash
+python3 rust-engine/scripts/benchmark-init.py \
+  --before /tmp/nasfind-before --after rust-engine/target/release/nasfind \
+  --files 100000 --runs 5 --output init.json
+python3 rust-engine/scripts/benchmark-native.py \
+  --before /tmp/nasfind-before --nasfind rust-engine/target/release/nasfind \
+  --files 100000 --runs 21 --warmup 3 --output queries.json
+# 单目录布局：benchmark-init.py 增加 --per-directory 100000。
+# 与 plocate 直接对照：benchmark-native.py 不传 --before（需安装外部工具）。
+```

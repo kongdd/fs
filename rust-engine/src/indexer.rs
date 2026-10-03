@@ -178,7 +178,10 @@ fn build_one(idx: &IndexConfig, progress: bool) -> Result<()> {
         let mut temporary = idx.clone();
         temporary.database = workspace.0.join("index.db");
         crate::native::update(&temporary, None, progress)?;
-        fs::File::open(&temporary.database)?.sync_all()?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary.database)?
+            .sync_all()?;
         fs::rename(&temporary.database, &idx.database)?;
     }
     ui::log(

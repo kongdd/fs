@@ -52,7 +52,7 @@ enum Commands {
         #[arg(long, global = true)]
         no_progress: bool,
         /// Index engine. plocate uses updatedb; Rust is the experimental native backend.
-        #[arg(long, global = true, value_enum, default_value_t = default_engine())]
+        #[arg(long, global = true, value_enum, default_value_t = IndexEngine::Rust)]
         engine: IndexEngine,
     },
 
@@ -78,14 +78,6 @@ enum IndexAction {
     Update { names: Vec<String> },
     /// Initialize missing databases only; leave existing databases unchanged.
     Init { names: Vec<String> },
-}
-
-fn default_engine() -> IndexEngine {
-    if cfg!(target_os = "linux") {
-        IndexEngine::Plocate
-    } else {
-        IndexEngine::Rust
-    }
 }
 
 fn main() {
@@ -217,12 +209,8 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     println!("indexes: {}", cfg.index.len());
     let mut legacy = false;
     for idx in &cfg.index {
-        // Validate every existing DB; missing indexes follow the platform default.
-        legacy |= if idx.database.is_file() {
-            !native::is_native(&idx.database)?
-        } else {
-            matches!(default_engine(), IndexEngine::Plocate)
-        };
+        // Missing indexes use Rust; validate every existing DB.
+        legacy |= idx.database.is_file() && !native::is_native(&idx.database)?;
     }
     if legacy {
         check_command(&cfg.tools.plocate, "--version")?;

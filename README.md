@@ -1,5 +1,7 @@
 # nasfind
 
+**跨平台原生版 v0.3.0**：[直接下载](https://github.com/kongdd/nasfind/releases/latest)，支持 Linux、macOS、Windows，无需编译或 plocate；[使用说明](rust-engine/INSTALL.md)。下文介绍保留的 plocate 源码版，原生版功能以其说明为准。
+
 NAS 文件名搜索工具，默认由 **updatedb 建库、plocate 检索候选、Rust 实现 Everything 式语法与筛选**。支持多个索引、目录排除和增量更新；`nasfind stats` 可快速查看哪些目录包含最多的索引条目。实验性 Rust 建库独立保留在 `rust-engine/`，不参与主程序编译；[块级索引优化](rust-engine/docs/chunk-index.md)包含设计与实测。
 
 ## 安装与配置（只需一次）

@@ -36,13 +36,11 @@ with tempfile.TemporaryDirectory(prefix='nasfind-native-e2e-') as temporary:
     def run(*args, ok=True):
         if args[0] == 'search':
             args = ('search', '--locate', *args[1:])
-        elif args[0] == 'index' and sys.platform == 'linux' and '--engine' not in args:
-            args = ('index', '--engine', 'rust', *args[1:])
         result = subprocess.run([binary, '-c', str(config), *args], capture_output=True, timeout=30)
         assert (result.returncode == 0) == ok, (args, result.stderr)
         return result
 
-    run('doctor', ok=sys.platform != 'linux') # Linux defaults to plocate; others to Rust.
+    run('doctor') # All platforms default to Rust; no external tools required.
     run('index', 'update', '--no-progress')
     run('doctor')
     assert b'0 dirs scanned' in run('index', 'update', '--no-progress').stderr

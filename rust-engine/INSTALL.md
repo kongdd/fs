@@ -4,11 +4,11 @@
 
 | 系统 | 架构 | 包 |
 |---|---|---|
-| Linux | Intel/AMD 64 位、ARM64 | linux-x86_64、linux-aarch64 |
-| macOS | Intel、Apple Silicon | macos-x86_64、macos-aarch64 |
+| Linux（Ubuntu 26.04 验证） | Intel/AMD 64 位、ARM64 | linux-x86_64、linux-aarch64 |
+| macOS 26+ | Apple Silicon | macos-aarch64 |
 | Windows | Intel/AMD 64 位、ARM64 | windows-x86_64、windows-aarch64 |
 
-Linux 包为静态可执行文件；Windows 包静态链接 C 运行库。macOS 要求 macOS 11 或更新版本；二进制未签名，首次运行可能需要在系统设置中允许。
+Linux 包为静态可执行文件；Windows 包静态链接 C 运行库。不再提供 Intel Mac 包或验证 Ubuntu 24.04；macOS 要求 macOS 26 或更新版本；二进制未签名，首次运行可能需要在系统设置中允许。
 
 ## 开始使用
 

@@ -4,7 +4,7 @@
 
 ## 下载与使用
 
-在 [Releases](https://github.com/kongdd/nasfind/releases/latest) 下载对应系统和架构的包，解压即可使用；具体步骤见 [安装说明](INSTALL.md)。Linux、macOS 提供 x86_64/aarch64，Windows 提供 x86_64/ARM64。所有平台默认原生引擎。
+在 [Releases](https://github.com/kongdd/nasfind/releases/latest) 下载对应系统和架构的包，解压即可使用；具体步骤见 [安装说明](INSTALL.md)。Linux、Windows 提供 x86_64/ARM64；macOS 仅 Apple Silicon，要求 macOS 26+。Linux 在 Ubuntu 26.04 验证。所有平台默认原生引擎。
 
 ## 源码构建
 

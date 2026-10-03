@@ -14,13 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-26.04
             target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             target: aarch64-unknown-linux-musl
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: macos-latest
+          - runner: macos-26
             target: aarch64-apple-darwin
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -36,7 +34,7 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       RUSTFLAGS: ${{ matrix.rustflags }}
-      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     steps:
@@ -74,7 +72,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:

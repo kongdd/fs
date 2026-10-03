@@ -71,10 +71,11 @@ for engine in engines:
         run('search', '-l', '0', '*', ok=False)
         # Retired/corrupt SQLite indexes must not be queried or overwritten.
         retired = base / 'retired.db'
-        payload = b'SQLite format 3\\0' + b'old index must remain intact'
+        payload = b'SQLite format 3\0' + b'old index must remain intact'
         retired.write_bytes(payload)
         retired_config = base / 'retired.toml'
-        retired_config.write_text(config.read_text().replace(str(base / 'index.db'), str(retired)))
+        retired_config.write_text(config.read_text().replace(
+            json.dumps(str(base / 'index.db')), json.dumps(str(retired))))
         for arguments in [
             ['search', 'soil'], ['index', 'update', '--no-progress'],
             ['index', '--folder', str(root / 'rain_folder'), '--no-progress'],

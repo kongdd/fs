@@ -125,71 +125,26 @@ pub fn visit(
     idx: &IndexConfig,
     grams: &[u32],
     basename: bool,
-    matches: impl Fn(&[u8]) -> bool,
+    matches: impl Fn(&[u8]) -> bool + Sync,
     visitor: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<bool> {
-    visit_filtered(idx, grams, basename, matches, |_| true, visitor)
+    visit_filtered(idx, grams, basename, matches, |_| true, visitor, 1)
 }
 
 /// Apply a conservative basename predicate before constructing full paths.
 /// The caller must accept every basename that could match the full query.
+/// Only large full scans use workers; workers=1 keeps the scan serial.
+/// Candidate lookups and all SQLite/output work stay on the caller's thread.
 pub fn visit_filtered(
-    idx: &IndexConfig,
-    grams: &[u32],
-    basename: bool,
-    matches: impl Fn(&[u8]) -> bool,
-    name_matches: impl Fn(&[u8]) -> bool,
-    visitor: impl FnMut(&[u8]) -> Result<bool>,
-) -> Result<bool> {
-    visit_with_scan(
-        idx,
-        grams,
-        basename,
-        (&matches, &name_matches),
-        visitor,
-        |connection, visitor| {
-            scan::sequential(connection, basename, (&matches, &name_matches), visitor)
-        },
-    )
-}
-
-/// Parallelize large scans only; candidate lookups and the public serial API
-/// retain their existing behavior. Workers never access the SQLite connection.
-pub fn visit_filtered_parallel(
     idx: &IndexConfig,
     grams: &[u32],
     basename: bool,
     matches: impl Fn(&[u8]) -> bool + Sync,
     name_matches: impl Fn(&[u8]) -> bool + Sync,
-    visitor: impl FnMut(&[u8]) -> Result<bool>,
+    mut visitor: impl FnMut(&[u8]) -> Result<bool>,
     workers: usize,
 ) -> Result<bool> {
-    visit_with_scan(
-        idx,
-        grams,
-        basename,
-        (&matches, &name_matches),
-        visitor,
-        |connection, visitor| {
-            scan::parallel(
-                connection,
-                basename,
-                (&matches, &name_matches),
-                visitor,
-                workers,
-            )
-        },
-    )
-}
-
-fn visit_with_scan<M: Fn(&[u8]) -> bool, N: Fn(&[u8]) -> bool, V: FnMut(&[u8]) -> Result<bool>>(
-    idx: &IndexConfig,
-    grams: &[u32],
-    basename: bool,
-    predicates: (&M, &N),
-    mut visitor: V,
-    scan: impl FnOnce(&Connection, &mut V) -> Result<bool>,
-) -> Result<bool> {
+    let predicates = (&matches, &name_matches);
     let mut connection = open_read(&idx.database)?;
     validate(&connection)?;
     let transaction = connection.transaction()?; // one consistent read snapshot
@@ -253,7 +208,7 @@ fn visit_with_scan<M: Fn(&[u8]) -> bool, N: Fn(&[u8]) -> bool, V: FnMut(&[u8]) -
             }
         }
     } else {
-        return scan(&transaction, &mut visitor);
+        return scan::parallel(&transaction, basename, predicates, &mut visitor, workers);
     }
     Ok(true)
 }

@@ -71,14 +71,15 @@ fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
         fs::write(fixture.idx.root.join(name), b"").unwrap();
     }
     update(&fixture.idx, None, false).unwrap();
-    let full_checks = std::cell::Cell::new(0);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let full_checks = AtomicUsize::new(0);
     let mut result = Vec::new();
     fs_core::native::visit_filtered(
         &fixture.idx,
         &[],
         false,
         |_| {
-            full_checks.set(full_checks.get() + 1);
+            full_checks.fetch_add(1, Ordering::Relaxed);
             true
         },
         |name| name.ends_with(b".csv"),
@@ -86,9 +87,10 @@ fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
             result.push(path.to_vec());
             Ok(true)
         },
+        1,
     )
     .unwrap();
-    assert_eq!(full_checks.get(), 1);
+    assert_eq!(full_checks.load(Ordering::Relaxed), 1);
     assert_eq!(
         result,
         [fixture
@@ -101,9 +103,18 @@ fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
     );
     let connection = rusqlite::Connection::open(&fixture.idx.database).unwrap();
     connection.execute("UPDATE blocks SET n=n+1", []).unwrap();
-    assert!(fs_core::native::visit_filtered(
-        &fixture.idx, &[], true, |_| true, |_| false, |_| Ok(true),
-    ).is_err());
+    assert!(
+        fs_core::native::visit_filtered(
+            &fixture.idx,
+            &[],
+            true,
+            |_| true,
+            |_| false,
+            |_| Ok(true),
+            1,
+        )
+        .is_err()
+    );
 }
 
 #[test]

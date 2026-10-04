@@ -138,26 +138,25 @@ pub(crate) fn visit_paths_until_filtered(
         let mut skipped = 0;
         let mut written = 0;
         for idx in &indexes {
-            let complete =
-                crate::native::visit_filtered_parallel(idx, &query, &name_matches, |path| {
-                    if is_excluded(path, &indexes)?
-                        || !matches_selection(path, scope.as_deref(), &options.extensions)?
-                        || !matches_kind(path, options.dirs, options.files)?
-                        || is_ignored_dir(path, &options.ignored_dirs)?
-                    {
-                        return Ok(true);
-                    }
-                    if options.existing && !path_from_bytes(path)?.try_exists()? {
-                        return Ok(true);
-                    }
-                    if skipped < options.offset {
-                        skipped += 1;
-                        return Ok(true);
-                    }
-                    let keep_going = visit(path, true)?;
-                    written += 1;
-                    Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
-                })?;
+            let complete = crate::native::visit_filtered(idx, &query, &name_matches, |path| {
+                if is_excluded(path, &indexes)?
+                    || !matches_selection(path, scope.as_deref(), &options.extensions)?
+                    || !matches_kind(path, options.dirs, options.files)?
+                    || is_ignored_dir(path, &options.ignored_dirs)?
+                {
+                    return Ok(true);
+                }
+                if options.existing && !path_from_bytes(path)?.try_exists()? {
+                    return Ok(true);
+                }
+                if skipped < options.offset {
+                    skipped += 1;
+                    return Ok(true);
+                }
+                let keep_going = visit(path, true)?;
+                written += 1;
+                Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
+            })?;
             if !complete {
                 break;
             }

@@ -63,6 +63,10 @@ for engine in engines:
         check('ext:' + ';'.join(['py'] * 65), ['script.PY', '.py'])
         py = paths('ext:py')
         assert paths('--offset', '1', '-l', '1', 'ext:py') == py[1:2]
+        # Preserve candidate-order pagination for each extension expression.
+        for expression in ['ext:nc;py;x', 'ext:x;py;nc', 'ext:py;nc;x;py']:
+            whole_extensions = paths(expression)
+            assert paths('--offset', '1', '-l', '3', expression) == whole_extensions[1:4]
         nc = {encoded(root / name) for name in names if name.endswith('.nc')} | {invalid}
         assert set(paths('ext:nc')) == nc
         assert set(paths('*.nc')) == nc

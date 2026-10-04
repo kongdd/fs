@@ -67,7 +67,7 @@ pub fn visit(
 }
 
 /// Use bounded workers for large, unindexed scans; small scans stay serial.
-pub fn visit_filtered_parallel(
+pub fn visit_filtered(
     idx: &IndexConfig,
     query: &Query,
     name_matches: impl Fn(&[u8]) -> bool + Sync,
@@ -80,7 +80,7 @@ pub fn visit_filtered_parallel(
     } else {
         1
     };
-    fs_core::native::visit_filtered_parallel(
+    fs_core::native::visit_filtered(
         idx,
         &query.grams,
         query.basename,

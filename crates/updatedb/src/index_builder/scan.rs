@@ -99,7 +99,7 @@ struct Profile {
 }
 
 impl Scanner {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn new(root: &Path, start: &Path, rules: ScanRules) -> Result<Self> {
         Self::with_jobs(root, start, rules, 1)
     }

@@ -90,7 +90,7 @@ struct ScanRules {
 }
 
 impl ScanRules {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn new(idx: &IndexConfig) -> Self {
         Self::with_exclusions(idx, &[])
     }

@@ -34,8 +34,10 @@ fn directory_stamp_keeps_identity_and_whole_seconds() {
     let stamp = directory_stamp(&metadata);
     assert_eq!(stamp.len(), 32);
     let actual: Vec<u64> = stamp
-        .chunks_exact(8)
-        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&bytes| u64::from_le_bytes(bytes))
         .collect();
     assert_eq!(actual, expected);
 }

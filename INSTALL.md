@@ -32,4 +32,8 @@ Windows PowerShell：
 
 Unix 可运行 `sh install.sh` 安装到 `$HOME/.local/bin`；或将可执行文件直接放到 PATH 中。数据库必须位于扫描目录之外。Windows 输出路径使用 `/`。
 
-旧 `NASFIND_CONFIG`、`~/.config/nasfind/config.toml` 和原生 v2 数据库仍可使用；`index / search` 保留为别名。不自动转换 v1/plocate 数据库。发布页附 `SHA256SUMS.txt` 供校验。
+旧 `NASFIND_CONFIG`、`~/.config/nasfind/config.toml` 配置入口仍可使用；`index / search` 保留为别名。**原生数据库仅支持当前 schema v4，旧 v1/v2/v3 库须使用新的数据库路径重建，不自动迁移或覆盖。** Unix 可显式使用 plocate 后端，其数据库不自动转换为原生格式。
+
+目录变更检测使用秒级时间戳，同一目录在一秒内发生的多次变化可能漏检。根目录在数据库中保存一次，其他目录路径相对编码；查询支持离线使用和多个同格式索引。
+
+发布页附 `SHA256SUMS.txt` 供校验。

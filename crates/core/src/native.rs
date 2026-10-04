@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{collections::HashMap, fs, io::Read, path::Path, time::Duration};
 
+mod scan;
+
 pub const APPLICATION_ID: i64 = 0x4e465231;
 pub const VERSION: i64 = 2;
 pub const BLOCK_SIZE: usize = 32;
@@ -124,7 +126,69 @@ pub fn visit(
     grams: &[u32],
     basename: bool,
     matches: impl Fn(&[u8]) -> bool,
-    mut visitor: impl FnMut(&[u8]) -> Result<bool>,
+    visitor: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<bool> {
+    visit_filtered(idx, grams, basename, matches, |_| true, visitor)
+}
+
+/// Apply a conservative basename predicate before constructing full paths.
+/// The caller must accept every basename that could match the full query.
+pub fn visit_filtered(
+    idx: &IndexConfig,
+    grams: &[u32],
+    basename: bool,
+    matches: impl Fn(&[u8]) -> bool,
+    name_matches: impl Fn(&[u8]) -> bool,
+    visitor: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<bool> {
+    visit_with_scan(
+        idx,
+        grams,
+        basename,
+        (&matches, &name_matches),
+        visitor,
+        |connection, visitor| {
+            scan::sequential(connection, basename, (&matches, &name_matches), visitor)
+        },
+    )
+}
+
+/// Parallelize large scans only; candidate lookups and the public serial API
+/// retain their existing behavior. Workers never access the SQLite connection.
+pub fn visit_filtered_parallel(
+    idx: &IndexConfig,
+    grams: &[u32],
+    basename: bool,
+    matches: impl Fn(&[u8]) -> bool + Sync,
+    name_matches: impl Fn(&[u8]) -> bool + Sync,
+    visitor: impl FnMut(&[u8]) -> Result<bool>,
+    workers: usize,
+) -> Result<bool> {
+    visit_with_scan(
+        idx,
+        grams,
+        basename,
+        (&matches, &name_matches),
+        visitor,
+        |connection, visitor| {
+            scan::parallel(
+                connection,
+                basename,
+                (&matches, &name_matches),
+                visitor,
+                workers,
+            )
+        },
+    )
+}
+
+fn visit_with_scan<M: Fn(&[u8]) -> bool, N: Fn(&[u8]) -> bool, V: FnMut(&[u8]) -> Result<bool>>(
+    idx: &IndexConfig,
+    grams: &[u32],
+    basename: bool,
+    predicates: (&M, &N),
+    mut visitor: V,
+    scan: impl FnOnce(&Connection, &mut V) -> Result<bool>,
 ) -> Result<bool> {
     let mut connection = open_read(&idx.database)?;
     validate(&connection)?;
@@ -164,8 +228,8 @@ pub fn visit(
             break; // Further intersections are unlikely to pay for their I/O.
         }
     }
-    let mut reader = BlockReader::new()?;
     if let Some(ids) = candidates {
+        let mut reader = BlockReader::new()?;
         // Batch row lookups, keeping memory bounded and allowing limits to
         // stop after the first batch instead of materializing every path.
         let mut statement = transaction.prepare_cached(
@@ -180,7 +244,7 @@ pub fn visit(
             let mut count = 0;
             while let Some(row) = rows.next()? {
                 count += 1;
-                if !reader.visit(row, &transaction, basename, &matches, &mut visitor)? {
+                if !reader.visit_filtered(row, &transaction, basename, predicates, &mut visitor)? {
                     return Ok(false);
                 }
             }
@@ -189,14 +253,7 @@ pub fn visit(
             }
         }
     } else {
-        let mut statement =
-            transaction.prepare("SELECT data,directory,size,n FROM blocks ORDER BY id")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            if !reader.visit(row, &transaction, basename, &matches, &mut visitor)? {
-                return Ok(false);
-            }
-        }
+        return scan(&transaction, &mut visitor);
     }
     Ok(true)
 }
@@ -269,9 +326,14 @@ pub fn directory_counts(
     Ok(root)
 }
 
-pub struct BlockReader {
+#[derive(Default)]
+struct PathReader {
     prefixes: HashMap<i64, Vec<u8>>,
     buffer: Vec<u8>,
+}
+
+pub struct BlockReader {
+    paths: PathReader,
     decoded: Vec<u8>,
     decompressor: zstd::bulk::Decompressor<'static>,
 }
@@ -279,8 +341,7 @@ pub struct BlockReader {
 impl BlockReader {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            prefixes: HashMap::new(),
-            buffer: Vec::new(),
+            paths: PathReader::default(),
             decoded: Vec::new(),
             decompressor: zstd::bulk::Decompressor::new()?,
         })
@@ -294,50 +355,103 @@ impl BlockReader {
         matches: &impl Fn(&[u8]) -> bool,
         visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
     ) -> Result<bool> {
+        self.visit_filtered(row, connection, basename, (matches, &|_| true), visitor)
+    }
+
+    pub fn visit_filtered(
+        &mut self,
+        row: &rusqlite::Row<'_>,
+        connection: &Connection,
+        basename: bool,
+        predicates: (&impl Fn(&[u8]) -> bool, &impl Fn(&[u8]) -> bool),
+        visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
+    ) -> Result<bool> {
+        let (matches, name_matches) = predicates;
         let Self {
-            prefixes,
-            buffer,
+            paths,
             decoded,
             decompressor,
         } = self;
         let size = usize::try_from(row.get::<_, i64>(2)?)?;
         let n = usize::try_from(row.get::<_, i64>(3)?)?;
-        if size == 0 || size > MAX_BLOCK_BYTES || n == 0 || n > BLOCK_SIZE {
-            bail!("corrupt filename block: invalid size or count");
-        }
-        decoded.clear();
-        decoded.reserve(size);
-        let length = decompressor.decompress_to_buffer(row.get_ref(0)?.as_blob()?, decoded)?;
-        if length != size
-            || decoded.last() != Some(&0)
-            || decoded.iter().filter(|&&b| b == 0).count() != n
-        {
-            bail!("corrupt filename block: size or count mismatch");
-        }
         let directory: i64 = row.get(1)?;
-        for name in decoded[..size - 1].split(|&b| b == 0) {
-            if name.is_empty()
-                || (directory != 0
-                    && (name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))))
-            {
-                bail!("corrupt filename block: invalid basename");
-            }
+        decode_block(
+            decompressor,
+            decoded,
+            row.get_ref(0)?.as_blob()?,
+            size,
+            n,
+            directory,
+        )?;
+        let names = decoded[..size - 1]
+            .split(|&b| b == 0)
+            .filter(|name| name_matches(name) && (!basename || matches(name)));
+        paths.visit(names, connection, directory, basename, matches, visitor)
+    }
+}
+
+fn decode_block(
+    decompressor: &mut zstd::bulk::Decompressor<'_>,
+    decoded: &mut Vec<u8>,
+    data: &[u8],
+    size: usize,
+    n: usize,
+    directory: i64,
+) -> Result<()> {
+    if size == 0 || size > MAX_BLOCK_BYTES || n == 0 || n > BLOCK_SIZE {
+        bail!("corrupt filename block: invalid size or count");
+    }
+    decoded.clear();
+    decoded.reserve(size);
+    let length = decompressor.decompress_to_buffer(data, decoded)?;
+    if length != size
+        || decoded.last() != Some(&0)
+        || decoded.iter().filter(|&&b| b == 0).count() != n
+    {
+        bail!("corrupt filename block: size or count mismatch");
+    }
+    for name in decoded[..size - 1].split(|&b| b == 0) {
+        if name.is_empty()
+            || (directory != 0
+                && (name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))))
+        {
+            bail!("corrupt filename block: invalid basename");
         }
+    }
+    Ok(())
+}
+
+impl PathReader {
+    fn visit<'a>(
+        &mut self,
+        mut names: impl Iterator<Item = &'a [u8]>,
+        connection: &Connection,
+        directory: i64,
+        basename: bool,
+        matches: &impl Fn(&[u8]) -> bool,
+        visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
+    ) -> Result<bool> {
+        let Self { prefixes, buffer } = self;
+        let Some(first) = names.next() else {
+            // Basename-only misses need no directory lookup or path allocation.
+            // Block validation above still runs even when no names match.
+            return Ok(true);
+        };
         if directory != 0
             && let std::collections::hash_map::Entry::Vacant(entry) = prefixes.entry(directory)
         {
             let mut prefix: Vec<u8> = connection
                 .prepare_cached("SELECT path FROM directories WHERE id=?")?
                 .query_row([directory], |r| r.get(0))?;
+            if prefix.is_empty() || prefix.contains(&0) {
+                bail!("corrupt index: invalid directory path");
+            }
             if !prefix.ends_with(b"/") {
                 prefix.push(b'/');
             }
             entry.insert(prefix);
         }
-        for name in decoded[..size - 1].split(|&b| b == 0) {
-            if basename && !matches(name) {
-                continue;
-            }
+        for name in std::iter::once(first).chain(names) {
             buffer.clear();
             if directory != 0 {
                 buffer.extend_from_slice(&prefixes[&directory]);

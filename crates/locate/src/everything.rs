@@ -3,7 +3,7 @@ use crate::platform::{normalize, os_string};
 use crate::{
     config::Config,
     matching::Query,
-    search::{SearchOptions, visit_paths_until},
+    search::{SearchOptions, visit_paths_until_filtered},
 };
 use anyhow::{Result, bail};
 use std::{collections::HashSet, ffi::OsString};
@@ -85,6 +85,7 @@ fn tokens(args: &[OsString]) -> Result<Vec<Token>> {
 struct Term {
     query: Query,
     anchor: Option<(OsString, bool)>,
+    basename: bool,
 }
 enum Expr {
     Term(Term),
@@ -110,17 +111,57 @@ impl Expr {
             Self::Not(a) => !a.matches(path),
         }
     }
-    // Each OR branch contributes mandatory positive literals. NOT and extension
-    // predicates never supply an unsafe anchor. Bound DNF expansion explicitly.
-    fn branches(&self) -> Result<Vec<Vec<(OsString, bool)>>> {
+    // Path terms cannot be decided from a basename. In particular NOT of
+    // a mixed/path expression must not negate a conservative approximation.
+    fn basename_only(&self) -> bool {
         match self {
-            Self::Term(term) => Ok(vec![term.anchor.iter().cloned().collect()]),
-            Self::Extension(_) | Self::Not(_) => Ok(vec![vec![]]),
+            Self::Term(term) => term.basename,
+            Self::Extension(_) => true,
+            Self::And(a, b) | Self::Or(a, b) => a.basename_only() && b.basename_only(),
+            Self::Not(a) => a.basename_only(),
+        }
+    }
+
+    fn may_match_basename(&self, name: &[u8]) -> bool {
+        match self {
+            Self::Term(term) => !term.basename || term.query.matches(name),
+            Self::Extension(_) => self.matches(name),
+            Self::And(a, b) => a.may_match_basename(name) && b.may_match_basename(name),
+            Self::Or(a, b) => a.may_match_basename(name) || b.may_match_basename(name),
+            Self::Not(a) => !a.basename_only() || !a.matches(name),
+        }
+    }
+
+    // Keep only the strongest necessary anchor per OR branch; the search
+    // uses one anchor, not a list of terms. NOT supplies none. Bound expansion.
+    fn branches(&self) -> Result<Vec<Option<(OsString, bool)>>> {
+        match self {
+            Self::Term(term) => Ok(vec![term.anchor.clone()]),
+            Self::Extension(extensions) => {
+                if extensions.len() > 64 {
+                    return Ok(vec![None]); // Preserve large extension-list support.
+                }
+                extensions
+                    .iter()
+                    .map(|extension| {
+                        let mut literal = Vec::with_capacity(extension.len() + 1);
+                        literal.push(b'.');
+                        literal.extend_from_slice(extension);
+                        // '[' is legal in an extension, but candidate patterns
+                        // interpret it as glob syntax. Keep only a safe literal
+                        // run; exact extension matching remains authoritative.
+                        anchor(&literal)
+                            .map(|bytes| os_string(bytes).map(|pattern| (pattern, true)))
+                            .transpose()
+                    })
+                    .collect()
+            }
+            Self::Not(_) => Ok(vec![None]),
             Self::Or(a, b) => {
                 let mut left = a.branches()?;
                 left.extend(b.branches()?);
                 if left.len() > 64 {
-                    bail!("too many OR branches (maximum 64)");
+                    return Ok(vec![None]); // Bound planning, not expression semantics.
                 }
                 Ok(left)
             }
@@ -128,15 +169,16 @@ impl Expr {
                 let left = a.branches()?;
                 let right = b.branches()?;
                 if left.len() * right.len() > 64 {
-                    bail!("too many OR branches (maximum 64)");
+                    return Ok(vec![None]);
                 }
                 Ok(left
-                    .into_iter()
+                    .iter()
                     .flat_map(|l| {
                         right.iter().map(move |r| {
-                            let mut terms = l.clone();
-                            terms.extend(r.iter().cloned());
-                            terms
+                            l.iter()
+                                .chain(r.iter())
+                                .max_by_key(|(s, _)| s.len())
+                                .cloned()
                         })
                     })
                     .collect())
@@ -243,7 +285,11 @@ impl Parser<'_> {
             regex,
             ..Default::default()
         })?;
-        Ok(Expr::Term(Term { query, anchor }))
+        Ok(Expr::Term(Term {
+            query,
+            anchor,
+            basename,
+        }))
     }
 }
 
@@ -297,7 +343,7 @@ pub fn visit(
     let branches = expr.branches()?;
     let mut anchors = Vec::new();
     for branch in branches {
-        let Some(best) = branch.into_iter().max_by_key(|(s, _)| s.len()) else {
+        let Some(best) = branch else {
             anchors = vec![(OsString::from("*"), false)];
             break;
         };
@@ -306,6 +352,7 @@ pub fn visit(
         }
     }
     let dedup = anchors.len() > 1;
+    let basename_only = expr.basename_only();
     let mut seen = HashSet::new();
     let mut skipped = 0;
     let mut written = 0;
@@ -319,18 +366,25 @@ pub fn visit(
             locate: false,
             ..options.clone()
         };
-        visit_paths_until(cfg, &candidate, |path| {
-            if !expr.matches(path) || (dedup && !seen.insert(path.to_vec())) {
-                return Ok(true);
-            }
-            if skipped < options.offset {
-                skipped += 1;
-                return Ok(true);
-            }
-            visitor(path)?;
-            written += 1;
-            Ok(options.limit.is_none_or(|limit| written < limit))
-        })?;
+        visit_paths_until_filtered(
+            cfg,
+            &candidate,
+            |name| expr.may_match_basename(name),
+            |path, native_filtered| {
+                if (!(native_filtered && basename_only) && !expr.matches(path))
+                    || (dedup && !seen.insert(path.to_vec()))
+                {
+                    return Ok(true);
+                }
+                if skipped < options.offset {
+                    skipped += 1;
+                    return Ok(true);
+                }
+                visitor(path)?;
+                written += 1;
+                Ok(options.limit.is_none_or(|limit| written < limit))
+            },
+        )?;
         if options.limit.is_some_and(|limit| written >= limit) {
             break;
         }

@@ -25,7 +25,7 @@ for engine in engines:
         root = base / 'soil_parent/data'
         root.mkdir(parents=True)
         (root / 'rain_folder').mkdir()
-        names = ['soil.nc', 'SOIL.csv', 'rain.nc', 'soil_rain.nc', 'backup_soil.nc', 'my report.nc', 'a ! b.txt', 'rain_folder/other.nc', '中文.nc']
+        names = ['soil.nc', 'SOIL.csv', 'rain.nc', 'soil_rain.nc', 'backup_soil.nc', 'my report.nc', 'a ! b.txt', 'rain_folder/other.nc', '中文.nc', 'script.PY', 'not.py.bak', 'literal.[ab]', 'single.x', '.py']
         for name in names:
             (root / name).touch()
         invalid = os.fsencode(root) + (b'/bad_native.nc' if sys.platform in ('darwin', 'win32') else b'/bad_\xff.nc')
@@ -54,6 +54,26 @@ for engine in engines:
         check('<soil | rain> ext:nc !backup', ['soil.nc', 'rain.nc', 'soil_rain.nc'])
         check('soil ext:nc;csv !backup', ['soil.nc', 'SOIL.csv', 'soil_rain.nc'])
         check('soil | soil_rain', soil)
+        check('ext:py', ['script.PY', '.py'])
+        check('ext:.PY', ['script.PY', '.py'], '--case-sensitive')
+        check('ext:py;py;x', ['script.PY', '.py', 'single.x'])
+        check('ext:[ab]', ['literal.[ab]'])
+        check('ext:py | soil', soil + ['script.PY', '.py'])
+        check('ext:py !script', ['.py'])
+        check('ext:' + ';'.join(['py'] * 65), ['script.PY', '.py'])
+        py = paths('ext:py')
+        assert paths('--offset', '1', '-l', '1', 'ext:py') == py[1:2]
+        nc = {encoded(root / name) for name in names if name.endswith('.nc')} | {invalid}
+        assert set(paths('ext:nc')) == nc
+        assert set(paths('*.nc')) == nc
+        assert set(paths('ext:nc !<path:rain_folder ext:nc>')) == nc - {encoded(root / 'rain_folder/other.nc')}
+        assert set(paths('ext:nc !path:rain_folder')) == nc - {encoded(root / 'rain_folder/other.nc')}
+        assert set(paths('ext:nc | path:rain_folder')) == nc | {encoded(root / 'rain_folder')}
+        check('soil*', ['soil.nc', 'SOIL.csv', 'soil_rain.nc'])
+        check('**soil**', soil)
+        check('soil*', ['soil.nc', 'soil_rain.nc'], '--case-sensitive')
+        glob_nc = paths('*.nc')
+        assert paths('--offset', '1', '-l', '2', '*.nc') == glob_nc[1:3]
         check('"my report"', ['my report.nc'])
         check('"a ! b"', ['a ! b.txt'])
         check('path:rain_folder ext:nc', ['rain_folder/other.nc'])
@@ -89,5 +109,7 @@ for engine in engines:
         root.rename(base / 'offline')
         check('soil', soil)
         assert invalid in paths('!soil')
+        check('ext:py', ['script.PY', '.py'])
+        assert invalid in paths('ext:nc')
         assert paths('-e', 'soil') == []
 print('Everything CLI integration tests passed: ' + ', '.join(engines))

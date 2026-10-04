@@ -85,6 +85,18 @@ pub(crate) fn visit_paths_until(
     options: &SearchOptions,
     mut visit: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
+    visit_paths_until_filtered(cfg, options, |_| true, |path, _| visit(path))
+}
+
+// The basename predicate is conservative and only pushed into Rust scans.
+// The visitor flag reports whether the native basename predicate was applied.
+// Full-path filtering stays authoritative for both backends.
+pub(crate) fn visit_paths_until_filtered(
+    cfg: &Config,
+    options: &SearchOptions,
+    name_matches: impl Fn(&[u8]) -> bool + Sync,
+    mut visit: impl FnMut(&[u8], bool) -> Result<bool>,
+) -> Result<()> {
     if options.patterns.is_empty() {
         bail!("at least one search pattern is required");
     }
@@ -126,25 +138,26 @@ pub(crate) fn visit_paths_until(
         let mut skipped = 0;
         let mut written = 0;
         for idx in &indexes {
-            let complete = crate::native::visit(idx, &query, |path| {
-                if is_excluded(path, &indexes)?
-                    || !matches_selection(path, scope.as_deref(), &options.extensions)?
-                    || !matches_kind(path, options.dirs, options.files)?
-                    || is_ignored_dir(path, &options.ignored_dirs)?
-                {
-                    return Ok(true);
-                }
-                if options.existing && !path_from_bytes(path)?.try_exists()? {
-                    return Ok(true);
-                }
-                if skipped < options.offset {
-                    skipped += 1;
-                    return Ok(true);
-                }
-                let keep_going = visit(path)?;
-                written += 1;
-                Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
-            })?;
+            let complete =
+                crate::native::visit_filtered_parallel(idx, &query, &name_matches, |path| {
+                    if is_excluded(path, &indexes)?
+                        || !matches_selection(path, scope.as_deref(), &options.extensions)?
+                        || !matches_kind(path, options.dirs, options.files)?
+                        || is_ignored_dir(path, &options.ignored_dirs)?
+                    {
+                        return Ok(true);
+                    }
+                    if options.existing && !path_from_bytes(path)?.try_exists()? {
+                        return Ok(true);
+                    }
+                    if skipped < options.offset {
+                        skipped += 1;
+                        return Ok(true);
+                    }
+                    let keep_going = visit(path, true)?;
+                    written += 1;
+                    Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
+                })?;
             if !complete {
                 break;
             }
@@ -152,7 +165,9 @@ pub(crate) fn visit_paths_until(
         return Ok(());
     }
     #[cfg(unix)]
-    return visit_plocate(cfg, options, &indexes, scope.as_deref(), visit);
+    return visit_plocate(cfg, options, &indexes, scope.as_deref(), |path| {
+        visit(path, false)
+    });
     #[cfg(windows)]
     bail!("plocate databases are unsupported on Windows; select Rust indexes");
 }

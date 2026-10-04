@@ -65,3 +65,28 @@ pub fn visit(
         visitor,
     )
 }
+
+/// Use bounded workers for large, unindexed scans; small scans stay serial.
+pub fn visit_filtered_parallel(
+    idx: &IndexConfig,
+    query: &Query,
+    name_matches: impl Fn(&[u8]) -> bool + Sync,
+    visitor: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<bool> {
+    // Only full scans need workers. Leave one core for SQLite/output;
+    // the scan module owns the bounds and serial warmup.
+    let workers = if query.grams.is_empty() {
+        std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1))
+    } else {
+        1
+    };
+    fs_core::native::visit_filtered_parallel(
+        idx,
+        &query.grams,
+        query.basename,
+        |path| query.matches(path),
+        name_matches,
+        visitor,
+        workers,
+    )
+}

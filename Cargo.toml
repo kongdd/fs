@@ -12,6 +12,7 @@ repository = "https://github.com/kongdd/fs"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
+memchr = "2"
 regex = "1.12"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

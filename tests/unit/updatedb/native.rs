@@ -65,6 +65,48 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
+    let fixture = Fixture::new();
+    for name in ["report.csv", "report.csv.bak", "other.txt"] {
+        fs::write(fixture.idx.root.join(name), b"").unwrap();
+    }
+    update(&fixture.idx, None, false).unwrap();
+    let full_checks = std::cell::Cell::new(0);
+    let mut result = Vec::new();
+    fs_core::native::visit_filtered(
+        &fixture.idx,
+        &[],
+        false,
+        |_| {
+            full_checks.set(full_checks.get() + 1);
+            true
+        },
+        |name| name.ends_with(b".csv"),
+        |path| {
+            result.push(path.to_vec());
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert_eq!(full_checks.get(), 1);
+    assert_eq!(
+        result,
+        [fixture
+            .idx
+            .root
+            .join("report.csv")
+            .as_os_str()
+            .as_bytes()
+            .to_vec()]
+    );
+    let connection = rusqlite::Connection::open(&fixture.idx.database).unwrap();
+    connection.execute("UPDATE blocks SET n=n+1", []).unwrap();
+    assert!(fs_core::native::visit_filtered(
+        &fixture.idx, &[], true, |_| true, |_| false, |_| Ok(true),
+    ).is_err());
+}
+
+#[test]
 fn varints_roundtrip_and_reject_corruption() {
     let ids = [1, 127, 128, 99999, u32::MAX as u64, u64::MAX];
     assert_eq!(unpack(&pack(&ids)).unwrap(), ids);

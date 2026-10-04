@@ -65,6 +65,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
     parser.add_argument('--fs', default='target/release/fs')
+    parser.add_argument('--before', help='Compare saved Rust executable against --fs on the same native DB')
+    parser.add_argument('--with-plocate', action='store_true', help='Also query plocate in the same --before run (three-way comparison)')
     parser.add_argument('--parent', default=str(pathlib.Path.cwd()), help='Index storage, outside --root; prefer the same filesystem')
     parser.add_argument('--exclude-dir', action='append', default=None, help='Default: @eaDir only; .git/dependencies/builds remain included')
     parser.add_argument('--init-runs', type=int, default=3)
@@ -72,10 +74,13 @@ def main():
     parser.add_argument('--runs', type=int, default=21, help='Repeated query samples, excluding first and warmups')
     parser.add_argument('--warmup', type=int, default=3)
     parser.add_argument('--native-only', action='store_true')
+    parser.add_argument('--query', action='append', choices=['rare', 'common', 'soil', 'and', 'or', 'missing', 'short', 'glob', 'extension', 'path', 'limited', 'all', 'negation', 'short_limited', 'regex_scan'], help='Run only these query labels (repeatable); default: all')
     parser.add_argument('--output', default='docs/updatedb/real-benchmark.json.txt')
     args = parser.parse_args()
     if min(args.init_runs, args.update_runs, args.runs) < 1 or args.warmup < 0:
         parser.error('run counts must be positive, warmup must be nonnegative')
+    if args.with_plocate and (not args.before or args.native_only):
+        parser.error('--with-plocate requires --before and cannot be combined with --native-only')
     root = pathlib.Path(args.root).resolve(strict=True)
     parent = pathlib.Path(args.parent).resolve(strict=True)
     output = pathlib.Path(args.output).resolve()
@@ -90,9 +95,21 @@ def main():
     if pathlib.Path('/usr/bin/time').exists() and b'GNU Time' in subprocess.run(
             ['/usr/bin/time', '--version'], capture_output=True).stdout:
         bench.GNU_TIME = '/usr/bin/time'
-    engines = ['rust'] if args.native_only else ['rust', 'plocate']
+    before = str(pathlib.Path(args.before).resolve(strict=True)) if args.before else None
+    engines = ['before', 'after'] if before else (['rust'] if args.native_only else ['rust', 'plocate'])
+    if args.with_plocate:
+        engines.append('plocate')
+    def engine_order(trial):
+        if len(engines) == 2:
+            return engines if trial % 2 == 0 else list(reversed(engines))
+        start = trial % len(engines)
+        order = engines[start:] + engines[:start]
+        return order if (trial // len(engines)) % 2 == 0 else list(reversed(order))
+
+    binaries = {engine: before if engine == 'before' else binary for engine in engines}
+    backends = {engine: 'plocate' if engine == 'plocate' else 'rust' for engine in engines}
     tools = {name: shutil.which(name) for name in ['plocate', 'updatedb']}
-    if not args.native_only and not all(tools.values()):
+    if ((not before and not args.native_only) or args.with_plocate) and not all(tools.values()):
         parser.error('plocate and updatedb required for comparison; otherwise use --native-only')
     report = {'started_utc': datetime.now(timezone.utc).isoformat(),
               'root': str(root), 'storage_parent': str(parent), 'exclude_dirs': exclusions,
@@ -103,8 +120,12 @@ def main():
               'tools': tools, 'rss_tool': bench.GNU_TIME,
               'init_runs': args.init_runs, 'update_runs': args.update_runs,
               'query_runs': args.runs, 'warmups': args.warmup,
-              'note': 'Read-only source. No caches cleared; inventory warms directory metadata before builds. Fresh DB each init, alternating engine order. CLI timings include process startup, output to a temporary file, GNU time and stats refresh for index commands. Queries use default Everything ASCII-insensitive basename semantics (path: explicitly uses full path). P50/P95 exclude first query and warmups. Source inventory verified again at end. No changed-directory update test: source is never modified. RSS is GNU time peak, not summed process-tree RSS.',
+              'query_order': 'Two engines alternate; three engines rotate through all six permutations.',
+              'note': 'Read-only source. No caches cleared; inventory warms directory metadata before builds. Fresh DB each init, alternating engine order. CLI timings include process startup, output to a temporary file, GNU time and stats refresh for index commands. Queries use default Everything ASCII-insensitive basename semantics (path: explicitly uses full path), except regex_scan which uses --regex with default basename scope. P50/P95 exclude first query and warmups. Source inventory verified again at end. No changed-directory update test: source is never modified. RSS is GNU time peak, not summed process-tree RSS.',
               'engines': {engine: {'init': [], 'unchanged_update': [], 'queries': {}} for engine in engines}}
+    if before:
+        report['before_binary_sha256'] = hashlib.sha256(pathlib.Path(before).read_bytes()).hexdigest()
+        report['note'] += ' Before/after queries share the final after native DB; both versions verify its full inventory.'
     if pathlib.Path('/proc/cpuinfo').exists():
         report['cpu_model'] = next((line.split(':', 1)[1].strip() for line in pathlib.Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), None)
 
@@ -114,7 +135,8 @@ def main():
 
     start = time.perf_counter()
     expected, directories, pruned = snapshot(root, {os.fsencode(name) for name in exclusions})
-    universes = {'rust': expected, 'plocate': (expected - {os.fsencode(root)}) | pruned}
+    universes = {engine: expected if backends[engine] == 'rust'
+                 else (expected - {os.fsencode(root)}) | pruned for engine in engines}
     report['index_semantics'] = 'Rust includes root and omits pruned directory markers; updatedb omits root but retains pruned directory markers. Exact per-engine inventories are validated, not silently normalized.'
     report['inventory'] = {'entries': len(expected), 'directories': directories,
                            'non_directory_entries': len(expected) - directories,
@@ -129,7 +151,7 @@ def main():
         commands = {}
         databases = {}
         for trial in range(args.init_runs):
-            for engine in engines if trial % 2 == 0 else reversed(engines):
+            for engine in engine_order(trial):
                 storage = base / engine
                 if storage.exists():
                     shutil.rmtree(storage)
@@ -139,9 +161,9 @@ def main():
                 config.write_text('[filters]\nexclude_dirs=' + json.dumps(exclusions) +
                                   '\n[[index]]\nname="bench"\nroot=' + json.dumps(str(root)) +
                                   '\ndatabase=' + json.dumps(str(database)) + '\n')
-                command = [binary, '-c', str(config)]
+                command = [binaries[engine], '-c', str(config)]
                 commands[engine], databases[engine] = command, database
-                sample, _ = bench.measure(command + ['index', 'update', '--engine', engine, '--no-progress'])
+                sample, _ = bench.measure(command + ['index', 'update', '--engine', backends[engine], '--no-progress'])
                 sample.update({'trial': trial, 'index_bytes': database.stat().st_size,
                                'stats_bytes': database.with_name('stats.db').stat().st_size})
                 data = subprocess.check_output(command + ['search', '-0', '*'])
@@ -150,11 +172,17 @@ def main():
                 print(engine, 'init', sample, flush=True)
                 save()
         for trial in range(args.update_runs):
-            for engine in engines if trial % 2 == 0 else reversed(engines):
-                sample, _ = bench.measure(commands[engine] + ['index', 'update', '--engine', engine, '--no-progress'])
+            for engine in engine_order(trial):
+                sample, _ = bench.measure(commands[engine] + ['index', 'update', '--engine', backends[engine], '--no-progress'])
                 report['engines'][engine]['unchanged_update'].append(sample)
                 print(engine, 'unchanged_update', trial, sample, flush=True)
             save()
+        if before:
+            # Query both executables against exactly the same persisted index.
+            commands['before'] = [before, '-c', commands['after'][2]]
+            for engine in ['before', 'after']:
+                check(subprocess.check_output(commands[engine] + ['search', '-0', '*']),
+                      universes[engine], (engine, 'shared native DB'))
         names = {path: path.rsplit(b'/', 1)[-1].lower() for path in expected}
         frequencies = collections.Counter(names.values())
         rare = next((name for name in sorted(frequencies) if frequencies[name] == 1 and len(name) >= 12
@@ -171,9 +199,16 @@ def main():
             ('extension', 'ext:py', lambda p, n: n.endswith(b'.py'), None),
             ('path', 'path:USGS', lambda p, n: b'usgs' in p.lower(), None),
             ('limited', 'readme', lambda p, n: b'readme' in n, 50),
+            ('all', '*', lambda p, n: True, None),
+            ('negation', '!py', lambda p, n: b'py' not in n, None),
+            ('short_limited', 'py', lambda p, n: b'py' in n, 50),
+            ('regex_scan', '.*py.*', lambda p, n: b'py' in n, None),
         ]
         if rare is None:
             queries = [query for query in queries if query[0] != 'rare']
+        if args.query:
+            queries = [query for query in queries if query[0] in args.query]
+        report['query_labels'] = [query[0] for query in queries]
         time.sleep(3)
         for label, expression, predicate, limit in queries:
             oracles = {engine: {path for path in universes[engine]
@@ -182,6 +217,8 @@ def main():
 
             def query(engine):
                 extra = ['-l', str(limit)] if limit is not None else []
+                if label == 'regex_scan':
+                    extra.append('--regex')
                 sample, data = bench.measure(commands[engine] + ['search', '-0'] + extra + [expression])
                 check(data, oracles[engine], (engine, label), limit)
                 return sample
@@ -189,15 +226,16 @@ def main():
             first = {engine: query(engine) for engine in engines}
             warmups = {engine: [] for engine in engines}
             for trial in range(args.warmup):
-                for engine in engines if trial % 2 == 0 else reversed(engines):
+                for engine in engine_order(trial):
                     warmups[engine].append(query(engine))
             samples = {engine: [] for engine in engines}
             for trial in range(args.runs):
-                for engine in engines if trial % 2 == 0 else reversed(engines):
+                for engine in engine_order(trial):
                     samples[engine].append(query(engine))
             for engine in engines:
                 oracle = oracles[engine]
-                row = {'expression': expression, 'matches': min(limit, len(oracle)) if limit else len(oracle),
+                row = {'expression': expression, 'regex': label == 'regex_scan', 'limit': limit,
+                       'matches': min(limit, len(oracle)) if limit else len(oracle),
                        'first_sample': first[engine], 'samples': samples[engine],
                        'warmup_samples': warmups[engine], **distribution(samples[engine])}
                 report['engines'][engine]['queries'][label] = row

@@ -26,9 +26,101 @@ fn groups_quotes_paths_and_bytes() {
     assert!(expr("regex:soil[0-9]").matches(b"/data/SOIL7.nc"));
 }
 #[test]
+fn basename_pushdown_is_conservative_for_paths_and_not() {
+    let expressions = [
+        "*.csv",
+        "ext:py",
+        "soil md",
+        "soil | ext:py",
+        "!ext:py",
+        "path:soil ext:py",
+        "!path:soil",
+        "!<path:soil ext:py>",
+        "!<soil | path:rain>",
+        "!<soil ext:py>",
+        "regex:soil",
+        "path:soil | rain",
+    ];
+    let paths: &[&[u8]] = &[
+        b"/soil/other.py",
+        b"/rain/soil.csv",
+        b"/data/SOIL.md",
+        b"/data/bad_\xff.py",
+        b"/data/.py",
+        b"/data/other.txt",
+    ];
+    for expression in expressions {
+        let q = expr(expression);
+        for path in paths {
+            let name = path.rsplit(|&b| b == b'/').next().unwrap();
+            assert!(
+                !q.matches(path) || q.may_match_basename(name),
+                "{expression} {path:?}"
+            );
+            if q.basename_only() {
+                assert_eq!(q.matches(path), q.may_match_basename(name));
+            }
+        }
+    }
+    assert!(!expr("*.csv").may_match_basename(b"report.csv.bak"));
+    assert!(!expr("ext:py").may_match_basename(b"report.py.bak"));
+    assert!(!expr("!ext:py").may_match_basename(b"report.py"));
+    assert!(expr("!path:soil").may_match_basename(b"soil.py"));
+}
+
+#[test]
+fn extension_candidates_are_sound() {
+    let q = expr("ext:py;CSV;[ab];x");
+    let branches = q.branches().unwrap();
+    assert_eq!(branches.len(), 4);
+    for path in [
+        b"/data/bad_\xff.PY".as_slice(),
+        b"/data/report.csv",
+        b"/data/report.[ab]",
+        b"/data/report.x",
+    ] {
+        assert!(q.matches(path));
+        assert!(
+            branches
+                .iter()
+                .any(|branch| branch.iter().all(|(pattern, basename)| {
+                    Query::new(&SearchOptions {
+                        patterns: vec![pattern.clone()],
+                        basename: *basename,
+                        ignore_case: true,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .matches(path)
+                }))
+        );
+    }
+    assert!(expr("!ext:py").branches().unwrap()[0].is_none());
+    let list = std::iter::repeat_n("py", 65).collect::<Vec<_>>().join(";");
+    assert!(expr(&format!("ext:{list}")).branches().unwrap()[0].is_none());
+    let list = (0..9)
+        .map(|n| format!("e{n}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    assert!(expr(&format!("ext:{list} ext:{list}")).branches().unwrap()[0].is_none());
+}
+
+#[test]
 fn anchors_are_sound_and_bad_syntax_rejected() {
+    for (text, anchor, basename) in [
+        ("soil md", "soil", true),
+        ("soil readme", "readme", true),
+        ("soil !rain", "soil", true),
+        ("soil rain", "rain", true),
+        ("path:soil md", "soil", false),
+    ] {
+        assert_eq!(
+            expr(text).branches().unwrap(),
+            vec![Some((anchor.into(), basename))]
+        );
+    }
     assert_eq!(anchor(b"[abc]*soil?.nc"), Some(b"soil".to_vec()));
-    assert_eq!(expr("soil | !rain").branches().unwrap()[1].len(), 0);
+    assert!(expr("soil | !rain").branches().unwrap()[1].is_none());
     for text in [
         "a |", "<>", "<a", "a >", "!", "\"a", "ext:", "folder:", "path:", "[abc",
     ] {

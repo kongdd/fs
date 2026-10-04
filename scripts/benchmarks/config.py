@@ -85,11 +85,14 @@ def snapshot(root, exclusions, paths):
     return included, pruned, directories
 
 
-def filtered(paths, extensions, files):
+def filtered(paths, extensions, files, excluded_paths=()):
     extensions = {os.fsencode(ext.lstrip('.')).lower() for ext in extensions}
     files = {os.fsencode(name).lower() for name in files}
+    blocked = [os.fsencode(path).rstrip(b'/') for path in excluded_paths]
     result = set()
     for path in paths:
+        if any(path == item or path.startswith(item + b'/') for item in blocked):
+            continue
         name = path.rstrip(b'/').rsplit(b'/', 1)[-1].lower()
         dot = name.rfind(b'.')
         if name not in files and not (dot > 0 and name[dot + 1:] in extensions):
@@ -190,8 +193,8 @@ def main():
     report['inventory'] = {'entries': len(inventory), 'directories': directories, 'pruned_markers': len(pruned),
                            'seconds': time.perf_counter() - start,
                            'sha256': hashlib.sha256(b'\0'.join(sorted(inventory))).hexdigest()}
-    expected = {'rust': filtered(inventory, extensions, files),
-                'plocate': filtered((inventory - {os.fsencode(root)}) | pruned, extensions, files)}
+    expected = {'rust': filtered(inventory, extensions, files, paths),
+                'plocate': filtered((inventory - {os.fsencode(root)}) | pruned, extensions, files, paths)}
     report['expected_filtered_totals'] = {engine: len(values) for engine, values in expected.items()}
     report['status'] = 'building'
     print('inventory', report['inventory'], 'filtered totals', report['expected_filtered_totals'], flush=True)

@@ -29,5 +29,5 @@ python3 scripts/release/package.py aarch64-apple-darwin
 
 ## tools/
 
-- `setup-plocate.py`：Linux 可选私有 plocate 工具；默认原生引擎不需要。
+- `setup-plocate.py`：Linux 私有 plocate 工具，仅在显式选择 plocate 引擎时需要。
 - `index-and-count.sh`：更新当前配置的索引，再显示目录排行；通过 `FS_CONFIG` 指定配置。

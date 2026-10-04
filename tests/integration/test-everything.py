@@ -44,8 +44,8 @@ for engine in engines:
             actual = paths(*flags, expression)
             wanted = {encoded(root / name) for name in expected}
             assert set(actual) == wanted and len(actual) == len(wanted), (engine, expression, actual, wanted)
-        # Native indexing is the default; plocate is explicitly selected.
-        arguments = [] if engine == 'rust' else ['--engine', 'plocate']
+        # Plocate is the default; Rust is explicitly selected on all platforms.
+        arguments = ['--engine', 'rust'] if engine == 'rust' else []
         run('index', 'update', '--no-progress', *arguments)
         assert (base / 'index.db').read_bytes().startswith(b'SQLite format 3\0') == (engine == 'rust')
         soil = ['soil.nc', 'SOIL.csv', 'soil_rain.nc', 'backup_soil.nc']

@@ -16,11 +16,14 @@ exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 
 # Edit roots and database paths for your system before indexing.
-# Keep databases outside the scanned roots.
+# Databases may live inside a root; the file and SQLite sidecars are not indexed.
+# update_database and search_database are optional. Omit them to use database for both.
 [[index]]
 name = "research"
 root = "/volume1/research"
 database = "/var/lib/nasfind/research.db"
+# update_database = "/var/lib/nasfind/research-build.db"
+# search_database = "/var/lib/nasfind/research.db"
 # Relative paths are resolved against this index root.
 exclude_paths = ["project/cache"]
 

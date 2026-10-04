@@ -13,6 +13,7 @@ e2e:
 	cargo build --locked --release --bin fs
 	python3 tests/integration/test-native.py target/release/fs
 	python3 tests/integration/test-everything.py target/release/fs
+	python3 tests/integration/test-engine-default.py target/release/fs
 
 package:
 	cargo build --locked --release --bin fs --target $(TARGET)

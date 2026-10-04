@@ -7,10 +7,14 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::platform::{portable_absolute, portable_path};
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub tools: Tools,
     pub index: Vec<IndexConfig>,
+    /// Persisted by `fs config engine`. `None` keeps the built-in rust default.
+    pub engine: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,8 +78,23 @@ fn tool_path(name: &str) -> String {
 pub struct IndexConfig {
     pub name: String,
     pub root: PathBuf,
+    /// Fallback for both commands when a role-specific path is omitted.
     pub database: PathBuf,
+    /// `fs updatedb` writes this file when set.
+    pub update_database: Option<PathBuf>,
+    /// `fs locate` / `fs stats` read this file when set.
+    pub search_database: Option<PathBuf>,
     pub filters: Filters,
+}
+
+impl IndexConfig {
+    pub fn update_database(&self) -> &Path {
+        self.update_database.as_deref().unwrap_or(&self.database)
+    }
+
+    pub fn search_database(&self) -> &Path {
+        self.search_database.as_deref().unwrap_or(&self.database)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,6 +115,8 @@ struct RawConfig {
     tools: Tools,
     #[serde(default)]
     filters: Filters,
+    #[serde(default)]
+    engine: Option<String>,
     index: Vec<RawIndex>,
 }
 
@@ -104,6 +125,10 @@ struct RawIndex {
     name: String,
     root: PathBuf,
     database: PathBuf,
+    #[serde(default)]
+    update_database: Option<PathBuf>,
+    #[serde(default)]
+    search_database: Option<PathBuf>,
     #[serde(flatten)]
     filters: LocalFilters,
 }
@@ -137,13 +162,16 @@ impl Config {
         let global = raw.filters;
         let cfg = Self {
             tools: raw.tools,
+            engine: normalize_engine(raw.engine)?,
             index: raw
                 .index
                 .into_iter()
                 .map(|idx| IndexConfig {
                     name: idx.name,
-                    root: idx.root,
-                    database: idx.database,
+                    root: portable_path(idx.root),
+                    database: portable_path(idx.database),
+                    update_database: idx.update_database.map(portable_path),
+                    search_database: idx.search_database.map(portable_path),
                     filters: Filters {
                         exclude_dirs: idx
                             .filters
@@ -152,7 +180,10 @@ impl Config {
                         exclude_paths: idx
                             .filters
                             .exclude_paths
-                            .unwrap_or_else(|| global.exclude_paths.clone()),
+                            .unwrap_or_else(|| global.exclude_paths.clone())
+                            .into_iter()
+                            .map(portable_path)
+                            .collect(),
                         exclude_extensions: idx
                             .filters
                             .exclude_extensions
@@ -183,22 +214,33 @@ impl Config {
             if !names.insert(&idx.name) {
                 bail!("duplicate index name: {}", idx.name);
             }
-            if !idx.root.is_absolute() {
+            if !portable_absolute(&idx.root) {
                 bail!(
-                    "index {} root must be absolute: {}",
+                    "index {} root must be absolute (use /volume, C:/, or //server/share; a bare drive letter such as C: is the drive root): {}",
                     idx.name,
                     idx.root.display()
                 );
             }
-            if !idx.database.is_absolute() {
-                bail!(
-                    "index {} database path must be absolute: {}",
-                    idx.name,
-                    idx.database.display()
-                );
+            for (role, path) in [
+                ("database", idx.database.as_path()),
+                ("update_database", idx.update_database()),
+                ("search_database", idx.search_database()),
+            ] {
+                if !portable_absolute(path) {
+                    bail!(
+                        "index {} {role} path must be absolute: {}",
+                        idx.name,
+                        path.display()
+                    );
+                }
             }
-            if !dbs.insert(&idx.database) {
-                bail!("duplicate database path: {}", idx.database.display());
+            let update = idx.update_database();
+            let search = idx.search_database();
+            if !dbs.insert(update.to_path_buf()) {
+                bail!("duplicate database path: {}", update.display());
+            }
+            if search != update && !dbs.insert(search.to_path_buf()) {
+                bail!("duplicate database path: {}", search.display());
             }
             for name in &idx.filters.exclude_dirs {
                 if name.contains('/') || (cfg!(windows) && name.contains('\\')) {
@@ -230,8 +272,29 @@ impl Config {
             .collect();
         Ok(selected)
     }
+
+    /// Copy with `database` set to the file `updatedb` should write.
+    pub fn for_update(&self) -> Self {
+        self.with_role_database(IndexConfig::update_database)
+    }
+
+    /// Copy with `database` set to the file `locate` and `stats` should read.
+    pub fn for_search(&self) -> Self {
+        self.with_role_database(IndexConfig::search_database)
+    }
+
+    fn with_role_database(&self, pick: fn(&IndexConfig) -> &Path) -> Self {
+        let mut cfg = self.clone();
+        for idx in &mut cfg.index {
+            idx.database = pick(idx).to_path_buf();
+            idx.update_database = None;
+            idx.search_database = None;
+        }
+        cfg
+    }
 }
 
+/// `C:` is drive-relative in Windows path APIs. Treat a bare drive letter as the volume root.
 pub fn default_config_path() -> Option<PathBuf> {
     // Keep existing nasfind configurations usable after the rename.
     for variable in ["FS_CONFIG", "NASFIND_CONFIG"] {
@@ -257,6 +320,16 @@ pub fn default_config_path() -> Option<PathBuf> {
             ["fs", "nasfind"].map(|name| directory.join(name).join("config.toml"))
         })
         .find(|path| path.is_file())
+}
+
+fn normalize_engine(engine: Option<String>) -> Result<Option<String>> {
+    let Some(engine) = engine else {
+        return Ok(None);
+    };
+    match engine.as_str() {
+        "rust" | "plocate" => Ok(Some(engine)),
+        _ => bail!("engine must be rust or plocate, not {engine:?}"),
+    }
 }
 
 #[cfg(unix)]

@@ -308,15 +308,23 @@ fn visit_plocate(
 }
 
 // Lexical normalization only: queries must work even for deleted/offline paths.
+// `C:/` and `//server/share` stay absolute so a NAS or Windows index can be filtered from any OS.
 fn resolve_scope(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
+    let absolute = crate::platform::portable_path(if crate::platform::portable_absolute(path) {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
+    });
+    // Unix components collapse a UNC prefix to a single slash.
+    let unc = cfg!(unix) && absolute.as_os_str().as_encoded_bytes().starts_with(b"//");
+    let mut normalized = if unc {
+        PathBuf::from("//")
+    } else {
+        PathBuf::new()
     };
-    let mut normalized = PathBuf::new();
     for part in absolute.components() {
         match part {
+            Component::RootDir if unc => {}
             Component::CurDir => {}
             Component::ParentDir => {
                 normalized.pop();
@@ -324,7 +332,7 @@ fn resolve_scope(path: &Path) -> Result<PathBuf> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    Ok(normalized)
+    Ok(crate::platform::portable_path(normalized))
 }
 
 fn matches_kind(path: &[u8], dirs: bool, files: bool) -> Result<bool> {
@@ -357,25 +365,26 @@ fn map_mount_path(path: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> Result<bool> {
-    let path = path_from_bytes(path)?;
-    Ok(scope.is_none_or(|root| path.starts_with(root))
-        && (extensions.is_empty()
-            || path.extension().is_some_and(|ext| {
-                extensions.iter().any(|wanted| {
-                    ext.as_encoded_bytes()
-                        .eq_ignore_ascii_case(wanted.trim_start_matches('.').as_bytes())
-                })
-            })))
+    let path_obj = path_from_bytes(path)?;
+    Ok(scope.is_none_or(|root| {
+        crate::platform::portable_prefix(path, root.as_os_str().as_encoded_bytes())
+    }) && (extensions.is_empty()
+        || path_obj.extension().is_some_and(|ext| {
+            extensions.iter().any(|wanted| {
+                ext.as_encoded_bytes()
+                    .eq_ignore_ascii_case(wanted.trim_start_matches('.').as_bytes())
+            })
+        })))
 }
 
 fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> Result<bool> {
     let path_obj = path_from_bytes(path)?;
 
     // A result should belong to exactly one configured root. Longest-prefix matching
-    // handles nested roots deterministically.
+    // handles nested roots deterministically. Compare `/` paths so Windows and NAS indexes join.
     let mut owner: Option<&IndexConfig> = None;
     for idx in indexes {
-        if path_obj.starts_with(&idx.root)
+        if crate::platform::portable_prefix(path, idx.root.as_os_str().as_encoded_bytes())
             && owner
                 .is_none_or(|current| idx.root.as_os_str().len() > current.root.as_os_str().len())
         {
@@ -385,12 +394,12 @@ fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> Result<bool> {
 
     Ok(owner.is_some_and(|idx| {
         idx.filters.exclude_paths.iter().any(|blocked| {
-            let blocked = if blocked.is_absolute() {
+            let blocked = if crate::platform::portable_absolute(blocked) {
                 blocked.clone()
             } else {
                 idx.root.join(blocked)
             };
-            path_obj.starts_with(blocked)
+            crate::platform::portable_prefix(path, blocked.as_os_str().as_encoded_bytes())
         }) || path_obj.file_name().is_some_and(|name| {
             idx.filters.exclude_files.iter().any(|blocked| {
                 name.as_encoded_bytes()

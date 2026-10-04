@@ -27,6 +27,72 @@ fn parses_example_config() {
 }
 
 #[test]
+fn update_and_search_can_use_different_databases() {
+    let cfg = Config::parse(
+        r#"
+[[index]]
+name = "files"
+root = "/data"
+database = "/data/files.db"
+update_database = "/tmp/files-build.db"
+search_database = "/var/files.db"
+"#,
+    )
+    .unwrap();
+    let idx = &cfg.index[0];
+    assert_eq!(
+        idx.update_database(),
+        std::path::Path::new("/tmp/files-build.db")
+    );
+    assert_eq!(idx.search_database(), std::path::Path::new("/var/files.db"));
+    assert_eq!(
+        cfg.for_update().index[0].database,
+        std::path::PathBuf::from("/tmp/files-build.db")
+    );
+    assert_eq!(
+        cfg.for_search().index[0].database,
+        std::path::PathBuf::from("/var/files.db")
+    );
+    assert!(
+        Config::parse(
+            r#"
+[[index]]
+name = "files"
+root = "/data"
+database = "/data/files.db"
+update_database = "relative.db"
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn windows_and_nas_paths_are_absolute_with_slashes() {
+    let cfg = Config::parse(
+        r#"
+[[index]]
+name = "win"
+root = "C:\\Users"
+database = "C:\\fs\\c.db"
+search_database = "//nas/share/c.db"
+
+[[index]]
+name = "nas"
+root = "/volume1/CMIP6"
+database = "/volume1/CMIP6/fs.db"
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.index[0].root, std::path::PathBuf::from("C:/Users"));
+    assert_eq!(
+        cfg.index[0].search_database(),
+        std::path::Path::new("//nas/share/c.db")
+    );
+    assert!(cfg.for_search().index.iter().any(|idx| idx.name == "nas"));
+}
+
+#[test]
 fn selects_named_indexes() {
     let cfg = Config::parse(TEST_CONFIG).unwrap();
     let selected = cfg.select(&["archive".into()]).unwrap();

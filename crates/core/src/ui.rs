@@ -37,6 +37,27 @@ pub fn log(tone: Tone, message: std::fmt::Arguments<'_>) {
     eprintln!("{}", paint(&message.to_string(), tone, stderr_color()));
 }
 
+/// Windows consoles ignore `\r` and erase sequences until virtual-terminal mode is on.
+pub fn enable_ansi() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
+        }
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+        let handle = std::io::stderr().as_raw_handle();
+        let mut mode = 0u32;
+        unsafe {
+            if GetConsoleMode(handle, &mut mode) != 0 {
+                let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../tests/unit/core/ui.rs"]
 mod tests;

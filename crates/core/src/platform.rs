@@ -29,6 +29,142 @@ pub fn normalize(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Borrowed(bytes)
 }
 
+/// Component prefix match. Windows ignores slash style, ASCII case, and `\\?\`.
+pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let path = path_key(path);
+    let prefix = path_key(prefix);
+    if prefix.is_empty() {
+        return false;
+    }
+    if path == prefix {
+        return true;
+    }
+    let prefix = prefix.strip_suffix(b"/").unwrap_or(prefix.as_slice());
+    if prefix == b"/" {
+        return path.starts_with(b"/");
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with(b"/"))
+}
+
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
+}
+
+fn path_key(path: &Path) -> Vec<u8> {
+    let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
+    #[cfg(windows)]
+    {
+        for byte in &mut bytes {
+            if *byte == b'\\' {
+                *byte = b'/';
+            }
+            *byte = byte.to_ascii_lowercase();
+        }
+        if let Some(rest) = bytes.strip_prefix(b"//?/unc/") {
+            let mut unc = b"//".to_vec();
+            unc.extend_from_slice(rest);
+            bytes = unc;
+        } else if let Some(rest) = bytes.strip_prefix(b"//?/") {
+            bytes = rest.to_vec();
+        }
+    }
+    while bytes.len() > 1 && bytes.last() == Some(&b'/') {
+        let drive_root = bytes.len() == 3 && bytes[1] == b':';
+        if drive_root {
+            break;
+        }
+        bytes.pop();
+    }
+    bytes
+}
+
+/// `C:/...` and `//server/share` are absolute on every OS so a Windows index can be queried elsewhere.
+pub fn portable_absolute(path: &Path) -> bool {
+    path.is_absolute() || is_drive_or_unc(path.as_os_str().as_encoded_bytes())
+}
+
+/// Config and index paths use `/`, including Windows drive roots (`C:` -> `C:/`).
+pub fn portable_path(path: PathBuf) -> PathBuf {
+    let raw = path.as_os_str().as_encoded_bytes();
+    let windows_style = cfg!(windows) || is_drive_or_unc(raw) || raw.starts_with(br"\\");
+    if !windows_style || (!raw.contains(&b'\\') && raw.len() != 2) {
+        return path;
+    }
+    let mut bytes = raw.to_vec();
+    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        bytes.push(b'/');
+    }
+    for byte in &mut bytes {
+        if *byte == b'\\' {
+            *byte = b'/';
+        }
+    }
+    os_string(bytes).map(PathBuf::from).unwrap_or(path)
+}
+
+/// Prefix match on stored `/` paths. Drive letters ignore ASCII case; NAS paths stay case-sensitive.
+pub fn portable_prefix(path: &[u8], prefix: &[u8]) -> bool {
+    let path = slash_key(path);
+    let prefix = slash_key(prefix);
+    if prefix.is_empty() {
+        return false;
+    }
+    if path == prefix {
+        return true;
+    }
+    let prefix = prefix.strip_suffix(b"/").unwrap_or(prefix.as_slice());
+    if prefix == b"/" {
+        return path.starts_with(b"/");
+    }
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
+}
+
+fn slash_key(bytes: &[u8]) -> Vec<u8> {
+    let windows_style = is_drive_or_unc(bytes);
+    let mut bytes = bytes
+        .iter()
+        .map(|&byte| {
+            if windows_style && byte == b'\\' {
+                b'/'
+            } else {
+                byte
+            }
+        })
+        .collect::<Vec<_>>();
+    if bytes
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"//?/unc/"))
+    {
+        let mut unc = b"//".to_vec();
+        unc.extend_from_slice(&bytes[8..]);
+        bytes = unc;
+    } else if let Some(rest) = bytes.strip_prefix(b"//?/") {
+        bytes = rest.to_vec();
+    }
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        bytes[0] = bytes[0].to_ascii_lowercase();
+    }
+    while bytes.len() > 1 && bytes.last() == Some(&b'/') {
+        let drive_root = bytes.len() == 3 && bytes[1] == b':';
+        if drive_root {
+            break;
+        }
+        bytes.pop();
+    }
+    bytes
+}
+
+fn is_drive_or_unc(bytes: &[u8]) -> bool {
+    (bytes.len() >= 2
+        && bytes[1] == b':'
+        && bytes[0].is_ascii_alphabetic()
+        && (bytes.len() == 2 || matches!(bytes[2], b'/' | b'\\')))
+        || bytes.starts_with(b"//")
+        || bytes.starts_with(br"\\")
+}
+
 pub fn path_bytes(path: &Path) -> Cow<'_, [u8]> {
     let bytes = normalize(path.as_os_str().as_encoded_bytes());
     #[cfg(windows)]
@@ -141,6 +277,20 @@ pub fn directory_stamp(metadata: &Metadata) -> Vec<u8> {
         ]
     };
     values.into_iter().flat_map(u64::to_le_bytes).collect()
+}
+
+/// Whether a stored directory stamp still matches a fresh stat.
+/// Windows ignores attribute bits: archive, indexed, and temporary flags flip
+/// without a listing change and would otherwise rescan the whole tree.
+pub fn stamp_matches(stored: &[u8], current: &[u8]) -> bool {
+    #[cfg(windows)]
+    {
+        stored.len() == current.len() && stored.len() >= 24 && stored[..24] == current[..24]
+    }
+    #[cfg(not(windows))]
+    {
+        stored == current
+    }
 }
 
 #[cfg(test)]

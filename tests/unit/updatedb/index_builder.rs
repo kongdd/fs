@@ -7,7 +7,7 @@ use fs_locate::{
 };
 use std::os::unix::{
     ffi::{OsStrExt, OsStringExt},
-    fs::MetadataExt,
+    fs::{MetadataExt, PermissionsExt},
 };
 
 // Incremental-update tests mutate in a later second: subsecond changes are
@@ -34,6 +34,8 @@ impl Fixture {
                 name: "native".into(),
                 root,
                 database: workspace.join("native.db"),
+                update_database: None,
+                search_database: None,
                 filters: Filters::default(),
             },
             _workspace: workspace,
@@ -1115,4 +1117,109 @@ fn unsupported_schemas_are_rejected_without_overwriting() {
         assert!(visit(&fixture.idx, &Query::new(&options).unwrap(), |_| Ok(true)).is_err());
         assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
     }
+}
+
+#[test]
+fn database_inside_root_is_excluded_and_can_be_updated() {
+    let mut fixture = Fixture::new();
+    fixture.idx.database = fixture.idx.root.join("index.db");
+    fs::write(fixture.idx.root.join("keep.txt"), b"").unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    assert!(fixture.query(&["index.db"], true, false, false).is_empty());
+    assert_eq!(fixture.query(&["keep.txt"], true, false, false).len(), 1);
+    next_stamp_second();
+    fs::write(fixture.idx.root.join("next.txt"), b"").unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    assert_eq!(fixture.query(&["next.txt"], true, false, false).len(), 1);
+    assert!(
+        fixture
+            .query(&["index.db-journal"], true, false, false)
+            .is_empty()
+    );
+}
+
+#[test]
+fn unreadable_directory_is_skipped_and_previous_entries_are_kept() {
+    let fixture = Fixture::new();
+    let blocked = fixture.idx.root.join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::write(blocked.join("hidden.txt"), b"").unwrap();
+    fs::write(fixture.idx.root.join("visible.txt"), b"").unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o0);
+    fs::set_permissions(&blocked, perms).unwrap();
+    let readable = fs::read_dir(&blocked).is_ok();
+    if readable {
+        let mut perms = fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&blocked, perms).unwrap();
+        return;
+    }
+    next_stamp_second();
+    fs::write(fixture.idx.root.join("later.txt"), b"").unwrap();
+    let result = update(&fixture.idx, None, false);
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&blocked, perms).unwrap();
+    result.unwrap();
+    assert_eq!(fixture.query(&["hidden.txt"], true, false, false).len(), 1);
+    assert_eq!(fixture.query(&["later.txt"], true, false, false).len(), 1);
+}
+
+#[test]
+fn incremental_updates_do_not_follow_replaced_child_symlinks() {
+    for jobs in [1, 4] {
+        let fixture = Fixture::new();
+        let nested = fixture.idx.root.join("nested");
+        let outside = fixture._workspace.join("outside");
+        fs::create_dir(&nested).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(nested.join("old.nc"), b"").unwrap();
+        fs::write(outside.join("secret.nc"), b"").unwrap();
+        update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        fs::remove_dir_all(&nested).unwrap();
+        std::os::unix::fs::symlink(&outside, &nested).unwrap();
+        // Simulate the cached parent stamp matching after a same-second change.
+        let connection = Connection::open(&fixture.idx.database).unwrap();
+        connection
+            .execute(
+                "UPDATE directories SET stamp=? WHERE path=?",
+                params![
+                    stamp(&fs::metadata(&fixture.idx.root).unwrap()),
+                    b"".as_slice()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let report = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(report.reused, 1);
+        assert_eq!(report.skipped, 1);
+        assert!(fixture.query(&["secret.nc"], true, false, false).is_empty());
+        assert!(fixture.query(&["old.nc"], true, false, false).is_empty());
+    }
+}
+
+#[test]
+fn parallel_scan_visits_the_same_directories() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.idx.root.join("a/child")).unwrap();
+    fs::create_dir_all(fixture.idx.root.join("b")).unwrap();
+    fs::write(fixture.idx.root.join("a/file.txt"), b"").unwrap();
+    let collect = |jobs| {
+        let mut scanner = scan::Scanner::with_jobs(
+            &fixture.idx.root,
+            &fixture.idx.root,
+            ScanRules::new(&fixture.idx),
+            jobs,
+        )
+        .unwrap();
+        let mut paths = Vec::new();
+        while let Some(directory) = scanner.next().unwrap() {
+            paths.push(directory.path);
+        }
+        paths.sort();
+        paths
+    };
+    assert_eq!(collect(1), collect(4));
 }

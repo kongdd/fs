@@ -1,4 +1,81 @@
 use super::*;
+use std::path::Path;
+
+#[test]
+fn stamp_match_ignores_only_windows_attribute_word() {
+    let stored = 7u64.to_le_bytes().repeat(4);
+    let mut current = stored.clone();
+    current[24] = 0xff;
+    #[cfg(windows)]
+    assert!(stamp_matches(&stored, &current));
+    #[cfg(not(windows))]
+    assert!(!stamp_matches(&stored, &current));
+    current[8] = 1;
+    assert!(!stamp_matches(&stored, &current));
+}
+
+#[test]
+fn path_prefix_matches_components_not_string_prefixes() {
+    assert!(path_starts_with(
+        Path::new("/data/db"),
+        Path::new("/data/db")
+    ));
+    assert!(path_starts_with(
+        Path::new("/data/db/extra"),
+        Path::new("/data/db")
+    ));
+    assert!(!path_starts_with(
+        Path::new("/data/db-journal"),
+        Path::new("/data/db")
+    ));
+    assert!(path_starts_with(Path::new("/data"), Path::new("/")));
+    assert!(same_path(Path::new("/data/db"), Path::new("/data/db")));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_path_prefix_ignores_slash_case_and_verbatim() {
+    assert!(path_starts_with(
+        Path::new(r"C:\Users\fs\c.db"),
+        Path::new("c:/Users/fs/c.db")
+    ));
+    assert!(path_starts_with(
+        Path::new(r"\\?\C:\Users\fs\c.db"),
+        Path::new("c:/users/fs/c.db")
+    ));
+    assert!(same_path(
+        Path::new(r"C:\Users\fs"),
+        Path::new("c:/Users/fs")
+    ));
+    assert!(!path_starts_with(
+        Path::new(r"C:\Users\fs\c.db-journal"),
+        Path::new("c:/Users/fs/c.db")
+    ));
+}
+
+#[test]
+fn portable_prefix_handles_drive_case_and_windows_separators() {
+    for path in [
+        b"C:/data".as_slice(),
+        b"C:/data/item.nc",
+        br"C:\data\item.nc",
+    ] {
+        assert!(portable_prefix(path, b"c:/data"));
+    }
+    assert!(!portable_prefix(b"C:/data-other", b"c:/data"));
+    assert!(!portable_prefix(b"C:/data", b"d:/data"));
+    assert!(portable_prefix(
+        br"\\?\UNC\nas\share\item.nc",
+        b"//nas/share"
+    ));
+}
+
+#[test]
+fn portable_prefix_preserves_unix_backslashes() {
+    assert!(!portable_prefix(br"/data/cache\file.nc", b"/data/cache"));
+    assert!(portable_prefix(br"/data/a\b/item.nc", br"/data/a\b"));
+    assert!(!portable_prefix(b"/data/a/b/item.nc", br"/data/a\b"));
+}
 
 #[test]
 fn native_strings_roundtrip() {

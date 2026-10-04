@@ -35,10 +35,13 @@ impl Fixture {
         std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
         let cfg = Config {
             tools: Tools::default(),
+            engine: None,
             index: vec![IndexConfig {
                 name: "native".into(),
                 root,
                 database: base.join("index.db"),
+                update_database: None,
+                search_database: None,
                 filters: Filters {
                     exclude_dirs: vec!["hidden".into()],
                     ..Default::default()

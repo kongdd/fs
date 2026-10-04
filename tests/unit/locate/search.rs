@@ -7,6 +7,8 @@ fn idx(name: &str, root: &str, exts: &[&str]) -> IndexConfig {
         name: name.into(),
         root: PathBuf::from(root),
         database: PathBuf::from(format!("/tmp/{name}.db")),
+        update_database: None,
+        search_database: None,
         filters: crate::config::Filters {
             exclude_extensions: exts.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
@@ -109,6 +111,33 @@ fn selection_uses_component_boundaries_and_literal_paths() {
     assert!(matches_selection(b"/data/project[*]/bad_\xff.NC", root, &extensions).unwrap());
     assert!(!matches_selection(b"/data/project[*]/no_extension", root, &extensions).unwrap());
     assert!(matches_selection(b"/data/project[*]/no_extension", root, &[]).unwrap());
+}
+
+#[test]
+fn scopes_preserve_portable_roots() {
+    for (input, expected) in [
+        ("//nas/share/./project/../data", "//nas/share/data"),
+        (r"\\nas\share\project\..\data", "//nas/share/data"),
+        (r"C:\project\..\data", "C:/data"),
+    ] {
+        let scope = resolve_scope(Path::new(input)).unwrap();
+        assert_eq!(scope, PathBuf::from(expected));
+        assert!(matches_selection(expected.as_bytes(), Some(&scope), &[]).unwrap());
+        let child = format!("{expected}/file.nc");
+        assert!(matches_selection(child.as_bytes(), Some(&scope), &[]).unwrap());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_backslash_names_are_not_descendants_or_excluded() {
+    let path = br"/data/cache\file.nc";
+    assert!(!matches_selection(path, Some(Path::new("/data/cache")), &[]).unwrap());
+    let mut index = idx("test", "/data", &[]);
+    index.filters.exclude_paths.push("/data/cache".into());
+    assert!(!is_excluded(path, &[&index]).unwrap());
+    let scope = resolve_scope(Path::new(r"/data/a\b")).unwrap();
+    assert_eq!(scope, PathBuf::from(r"/data/a\b"));
 }
 
 #[test]

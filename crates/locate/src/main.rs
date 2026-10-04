@@ -53,9 +53,25 @@ enum Commands {
         /// Disable live progress (and legacy per-entry tracking).
         #[arg(long, global = true)]
         no_progress: bool,
-        /// Index engine. plocate uses external updatedb; Rust is the native backend.
-        #[arg(long, global = true, value_enum, default_value_t = IndexEngine::Rust)]
-        engine: IndexEngine,
+        /// Parallel filesystem scan threads for the Rust engine. 1 keeps a single walker.
+        #[arg(
+            short = 'j',
+            long,
+            global = true,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u16).range(1..)
+        )]
+        jobs: u16,
+        /// Index engine. Omit to use `fs config engine`, then the built-in rust default.
+        /// plocate is Linux-only and must be selected explicitly.
+        #[arg(long, global = true, value_enum, env = "FS_ENGINE")]
+        engine: Option<IndexEngine>,
+    },
+
+    /// Show or change settings stored in the config file.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 
     /// Search one or more configured databases.
@@ -75,10 +91,71 @@ enum Commands {
     Doctor,
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexEngine {
     Rust,
+    #[cfg_attr(not(target_os = "linux"), value(skip))]
     Plocate,
+}
+
+impl IndexEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Plocate => "plocate",
+        }
+    }
+
+    fn from_name(value: &str) -> Result<Self> {
+        let engine = match value {
+            "rust" => Self::Rust,
+            "plocate" => Self::Plocate,
+            _ => bail!("engine must be rust or plocate, not {value:?}"),
+        };
+        engine.ensure_supported()
+    }
+
+    fn ensure_supported(self) -> Result<Self> {
+        if self == Self::Plocate && !cfg!(target_os = "linux") {
+            bail!("plocate is only available on Linux; this system uses rust");
+        }
+        Ok(self)
+    }
+}
+
+fn builtin_engine() -> IndexEngine {
+    // Rust databases are the same format on every OS. plocate is opt-in on Linux.
+    IndexEngine::Rust
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Show or set the default updatedb engine. Does not convert existing databases.
+    Engine {
+        /// rust, or plocate on Linux. Omit to print the current default.
+        engine: Option<IndexEngine>,
+    },
+}
+
+fn env_engine() -> Result<Option<IndexEngine>> {
+    match env::var("FS_ENGINE") {
+        Ok(value) => Ok(Some(
+            IndexEngine::from_name(&value).context("invalid FS_ENGINE")?,
+        )),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `--engine` and `FS_ENGINE` are already folded into `explicit` by clap.
+fn resolve_engine(explicit: Option<IndexEngine>, configured: Option<&str>) -> Result<IndexEngine> {
+    if let Some(engine) = explicit {
+        return Ok(engine);
+    }
+    match configured {
+        Some(value) => IndexEngine::from_name(value),
+        None => builtin_engine().ensure_supported(),
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,9 +184,11 @@ fn run() -> Result<()> {
             names,
             folders,
             no_progress,
+            jobs,
             engine,
         } => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
+            let cfg = cfg.for_update();
             if action.is_some() && !names.is_empty() {
                 bail!("put index names after update/init, not before it");
             }
@@ -136,31 +215,100 @@ fn run() -> Result<()> {
                 }
                 None => names,
             };
+            let engine = resolve_engine(engine, cfg.engine.as_deref())?;
             indexer::build_indexes(
                 &cfg,
                 &names,
                 &folders,
                 !no_progress,
                 matches!(engine, IndexEngine::Rust),
+                jobs,
             )?;
             stats::refresh(&cfg, &names)
                 .context("index databases updated, but statistics refresh failed")
         }
         Commands::Search(mut options) => {
             let (cfg, path) = Config::load(cli.config.as_deref())?;
+            let cfg = cfg.for_search();
             options.ignored_dirs = ignore::load(&path)?;
             search::search(&cfg, &options)
         }
         Commands::Stats(options) => {
             let (cfg, _) = Config::load(cli.config.as_deref())?;
-            stats::stats(&cfg, &options)
+            stats::stats(&cfg.for_search(), &options)
         }
         Commands::Ignore { action } => {
             let (_, path) = Config::load(cli.config.as_deref())?;
             ignore::run(&path, action)
         }
+        Commands::Config { action } => config_command(cli.config.as_deref(), action),
         Commands::Doctor => doctor(cli.config.as_deref()),
     }
+}
+
+fn config_command(config: Option<&Path>, action: ConfigAction) -> Result<()> {
+    let ConfigAction::Engine { engine } = action;
+    let (_, path) = Config::load(config)?;
+    if let Some(engine) = engine {
+        engine.ensure_supported()?;
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        write_text_atomic(&path, set_config_engine(&text, engine.as_str())?)?;
+        if env::var_os("FS_ENGINE").is_some() {
+            ui::log(
+                ui::Tone::Warning,
+                format_args!("FS_ENGINE overrides the config file for this process"),
+            );
+        }
+    }
+    let (cfg, path) = Config::load(config)?;
+    let from_env = env_engine()?;
+    let effective = resolve_engine(from_env, cfg.engine.as_deref())?;
+    let source = match (from_env, cfg.engine.as_deref()) {
+        (Some(_), Some(saved)) if saved != effective.as_str() => {
+            format!("FS_ENGINE; config has {saved}")
+        }
+        (Some(_), _) => "FS_ENGINE".to_string(),
+        (None, Some(_)) => format!("config {}", path.display()),
+        (None, None) => "built-in default".to_string(),
+    };
+    println!("engine: {} ({source})", effective.as_str());
+    Ok(())
+}
+
+fn set_config_engine(text: &str, engine: &str) -> Result<String> {
+    let values: std::collections::BTreeMap<String, toml::Spanned<toml::Value>> =
+        toml::from_str(text)?;
+    let mut out = text.to_string();
+    if let Some(value) = values.get("engine") {
+        out.replace_range(value.span(), &format!("\"{engine}\""));
+    } else {
+        let offset = text
+            .split_inclusive('\n')
+            .take_while(|line| {
+                line.ends_with('\n')
+                    && (line.trim().is_empty() || line.trim_start().starts_with('#'))
+            })
+            .map(str::len)
+            .sum();
+        out.insert_str(offset, &format!("engine = \"{engine}\"\n"));
+    }
+    Ok(out)
+}
+
+fn write_text_atomic(path: &Path, text: String) -> Result<()> {
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let result = (|| -> Result<()> {
+        fs::write(&temporary, text.as_bytes())?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("failed to update {}", path.display()))
 }
 
 fn normalize_implicit_search(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -168,7 +316,8 @@ fn normalize_implicit_search(mut args: Vec<OsString>) -> Vec<OsString> {
         return args;
     }
     const COMMANDS: &[&str] = &[
-        "init", "updatedb", "index", "locate", "search", "stats", "ignore", "doctor", "help",
+        "init", "updatedb", "index", "locate", "search", "stats", "ignore", "config", "doctor",
+        "help",
     ];
 
     // Skip global options that may precede the command. This keeps both
@@ -221,10 +370,31 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     let (cfg, path) = Config::load(config_path)?;
     println!("config: {}", path.display());
     println!("indexes: {}", cfg.index.len());
+    let from_env = env_engine()?;
+    let default_engine = resolve_engine(from_env, cfg.engine.as_deref())?;
+    println!(
+        "default engine: {} ({})",
+        default_engine.as_str(),
+        match (from_env, cfg.engine.as_deref()) {
+            (Some(_), _) => "FS_ENGINE",
+            (None, Some(_)) => "config",
+            (None, None) => "built-in default",
+        }
+    );
+    let missing_use_plocate = matches!(default_engine, IndexEngine::Plocate);
     let mut legacy = false;
     for idx in &cfg.index {
-        // Missing indexes use Rust; validate every existing DB.
-        legacy |= idx.database.is_file() && !index_search::is_rust_index(&idx.database)?;
+        // Existing DBs identify their backend; missing DBs use the default engine.
+        let mut saw_file = false;
+        for path in [idx.update_database(), idx.search_database()] {
+            if path.is_file() {
+                saw_file = true;
+                legacy |= !index_search::is_rust_index(path)?;
+            }
+        }
+        if !saw_file {
+            legacy |= missing_use_plocate;
+        }
     }
     if legacy {
         check_command(&cfg.tools.plocate, "--version")?;
@@ -238,18 +408,32 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     let mut ok = true;
     for idx in &cfg.index {
         let root_ok = idx.root.is_dir();
-        println!(
-            "{}: root={} [{}], db={} [{}]",
-            idx.name,
-            idx.root.display(),
-            if root_ok { "ok" } else { "missing" },
-            idx.database.display(),
-            if idx.database.is_file() {
-                "ready"
-            } else {
-                "not built"
-            }
-        );
+        let update = idx.update_database();
+        let search = idx.search_database();
+        let ready = |path: &Path| {
+            if path.is_file() { "ready" } else { "not built" }
+        };
+        if update == search {
+            println!(
+                "{}: root={} [{}], db={} [{}]",
+                idx.name,
+                idx.root.display(),
+                if root_ok { "ok" } else { "missing" },
+                update.display(),
+                ready(update)
+            );
+        } else {
+            println!(
+                "{}: root={} [{}], update={} [{}], search={} [{}]",
+                idx.name,
+                idx.root.display(),
+                if root_ok { "ok" } else { "missing" },
+                update.display(),
+                ready(update),
+                search.display(),
+                ready(search)
+            );
+        }
         ok &= root_ok;
     }
     if !ok {

@@ -13,6 +13,7 @@ fn drop_disconnects_a_full_queue_before_joining() {
         receiver: Some(receiver),
         worker: Some(worker),
         profile: None,
+        skipped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     started.recv().unwrap();
     drop(scanner);
@@ -29,6 +30,7 @@ fn worker_panic_is_not_treated_as_successful_eof() {
         receiver: Some(receiver),
         worker: Some(worker),
         profile: None,
+        skipped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     assert!(
         scanner

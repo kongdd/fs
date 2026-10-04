@@ -211,10 +211,13 @@ fn source_database_and_filter_changes_invalidate_fingerprint() {
     std::fs::write(&database, b"old source").unwrap();
     let mut cfg = Config {
         tools: Tools::default(),
+        engine: None,
         index: vec![IndexConfig {
             name: "test".into(),
             root: "/missing/index-root".into(),
             database: database.clone(),
+            update_database: None,
+            search_database: None,
             filters: Filters::default(),
         }],
     };

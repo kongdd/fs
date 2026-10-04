@@ -1,7 +1,10 @@
 //! Rust index builder and incremental directory scanner.
 use crate::{
     config::IndexConfig,
-    platform::{directory_stamp as stamp, os_string, path_bytes, path_from_bytes},
+    platform::{
+        directory_stamp as stamp, os_string, path_bytes, path_from_bytes, path_starts_with,
+        same_path, stamp_matches,
+    },
     ui::{self, Tone},
 };
 use anyhow::{Context, Result, bail};
@@ -63,6 +66,7 @@ pub struct UpdateReport {
     pub entries: u64,
     pub scanned: u64,
     pub reused: u64,
+    pub skipped: u64,
     pub scan_elapsed: Duration,
     pub index_elapsed: Duration,
     pub finalize_elapsed: Duration,
@@ -86,7 +90,12 @@ struct ScanRules {
 }
 
 impl ScanRules {
+    #[cfg(test)]
     fn new(idx: &IndexConfig) -> Self {
+        Self::with_exclusions(idx, &[])
+    }
+
+    fn with_exclusions(idx: &IndexConfig, extra: &[PathBuf]) -> Self {
         Self {
             directories: idx
                 .filters
@@ -105,9 +114,161 @@ impl ScanRules {
                         idx.root.join(path)
                     }
                 })
+                .chain(index_artifacts(&idx.database))
+                .chain(extra.iter().cloned())
                 .collect(),
         }
     }
+}
+
+fn index_artifacts(database: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for suffix in ["", "-journal", "-wal", "-shm", ".lock"] {
+        let mut name = database.as_os_str().to_os_string();
+        name.push(suffix);
+        paths.push(PathBuf::from(name));
+    }
+    if let Some(parent) = database.parent()
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".fs-"))
+    {
+        paths.push(parent.to_path_buf());
+    }
+    paths
+}
+
+fn artifact_names_in(directory: &Path, database: &Path) -> HashSet<std::ffi::OsString> {
+    index_artifacts(database)
+        .into_iter()
+        .filter(|path| {
+            path.parent()
+                .is_some_and(|parent| same_path(parent, directory))
+        })
+        .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+        .collect()
+}
+
+pub(crate) fn artifact_paths(database: &Path) -> Vec<PathBuf> {
+    index_artifacts(database)
+}
+
+fn read_children(directory: &Path) -> std::io::Result<Vec<(std::ffi::OsString, bool)>> {
+    let mut children = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        children.push((entry.file_name(), entry.file_type()?.is_dir()));
+    }
+    children.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    Ok(children)
+}
+
+struct ListingFilter<'a> {
+    names: HashSet<std::ffi::OsString>,
+    prefixes: Vec<&'a Path>,
+}
+
+fn listing_filter<'a>(
+    directory: &Path,
+    database: &Path,
+    rules: &'a ScanRules,
+) -> ListingFilter<'a> {
+    let mut names = artifact_names_in(directory, database);
+    let mut prefixes = Vec::new();
+    for blocked in &rules.paths {
+        if blocked
+            .parent()
+            .is_some_and(|parent| same_path(parent, directory))
+        {
+            if let Some(name) = blocked.file_name() {
+                names.insert(name.to_os_string());
+            }
+        } else if path_starts_with(blocked, directory) {
+            prefixes.push(blocked.as_path());
+        }
+    }
+    ListingFilter { names, prefixes }
+}
+
+fn entry_excluded(
+    directory: &Path,
+    name: &std::ffi::OsString,
+    is_dir: bool,
+    filter: &ListingFilter<'_>,
+) -> bool {
+    if filter.names.contains(name) {
+        return true;
+    }
+    if !is_dir || filter.prefixes.is_empty() {
+        return false;
+    }
+    let child = directory.join(name);
+    filter
+        .prefixes
+        .iter()
+        .any(|blocked| path_starts_with(&child, blocked))
+}
+
+fn write_scan_progress(
+    terminal: bool,
+    last: &mut Instant,
+    label: &str,
+    done: f64,
+    expected: u64,
+    started: Instant,
+    current: &Path,
+) -> Result<()> {
+    if !terminal || last.elapsed() < Duration::from_millis(250) {
+        return Ok(());
+    }
+    let status = scan_progress(done, expected, started.elapsed(), current);
+    write!(std::io::stderr(), "\r\x1b[2K{label}: {status}")?;
+    std::io::stderr().flush()?;
+    *last = Instant::now();
+    Ok(())
+}
+
+fn scan_progress(done: f64, expected: u64, elapsed: Duration, current: &Path) -> String {
+    let rate = done / elapsed.as_secs_f64().max(0.001);
+    let place = current
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| current.display().to_string());
+    if expected == 0 {
+        return format!("{done:.0} dirs · {rate:.0}/s · ETA unavailable · {place}");
+    }
+    let fraction = (done / expected as f64).clamp(0.0, 0.99);
+    let filled = (fraction * 8.0) as usize;
+    let eta = if done < 1.0 {
+        "ETA estimating".to_string()
+    } else if done >= expected as f64 {
+        "past estimate".to_string()
+    } else {
+        let remaining = ((expected as f64 - done) / rate).ceil() as u64;
+        format!("ETA ~{}m{:02}s", remaining / 60, remaining % 60)
+    };
+    format!(
+        "[{}{}] ~{:.0}% · {done:.0}/{expected} dirs · {rate:.0}/s · {eta} · {place}",
+        "=".repeat(filled),
+        "-".repeat(8 - filled),
+        fraction * 100.0
+    )
+}
+
+fn listing_without_artifacts(
+    directory: &Path,
+    database: &Path,
+    entries: &[(std::ffi::OsString, bool)],
+) -> Vec<(std::ffi::OsString, bool)> {
+    let names = artifact_names_in(directory, database);
+    let mut kept: Vec<_> = entries
+        .iter()
+        .filter(|(name, _)| !names.contains(name))
+        .cloned()
+        .collect();
+    kept.sort_unstable();
+    kept
 }
 
 trait BlockPostings {
@@ -575,24 +736,61 @@ fn clear_postings(
     Ok(())
 }
 
+fn retain_indexed(
+    transaction: &rusqlite::Transaction,
+    paths: &DirectoryPaths,
+    directory: &Path,
+    id: i64,
+    visited: &mut HashSet<i64>,
+) -> Result<()> {
+    let mut stack = vec![(id, directory.to_path_buf())];
+    while let Some((id, directory)) = stack.pop() {
+        visited.insert(id);
+        let names = transaction
+            .prepare_cached("SELECT name FROM children WHERE directory=?")?
+            .query_map([id], |r| r.get::<_, Vec<u8>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in names {
+            let child = directory.join(os_string(name)?);
+            let stored = paths.encode(&child)?;
+            let child_id: Option<i64> = transaction
+                .prepare_cached("SELECT id FROM directories WHERE path=?")?
+                .query_row([stored.as_ref()], |r| r.get(0))
+                .optional()?;
+            if let Some(child_id) = child_id
+                && !visited.contains(&child_id)
+            {
+                stack.push((child_id, child));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Directory mtime permits reusing its immediate entries, NOT skipping its
 /// entire subtree. Every known child directory is still stat'ed independently.
 pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result<UpdateReport> {
+    update_with_jobs(idx, scope, progress, 1)
+}
+
+pub fn update_with_jobs(
+    idx: &IndexConfig,
+    scope: Option<&Path>,
+    progress: bool,
+    jobs: u32,
+) -> Result<UpdateReport> {
+    update_with_exclusions(idx, scope, progress, jobs, &[])
+}
+
+pub fn update_with_exclusions(
+    idx: &IndexConfig,
+    scope: Option<&Path>,
+    progress: bool,
+    jobs: u32,
+    extra_exclusions: &[PathBuf],
+) -> Result<UpdateReport> {
     if !idx.root.is_dir() {
         bail!("index root is not a directory: {}", idx.root.display());
-    }
-    let actual_root = fs::canonicalize(&idx.root)?;
-    let actual_database = if idx.database.exists() {
-        fs::canonicalize(&idx.database)?
-    } else {
-        fs::canonicalize(idx.database.parent().context("database has no parent")?)?.join(
-            idx.database
-                .file_name()
-                .context("database has no filename")?,
-        )
-    };
-    if actual_database.starts_with(&actual_root) {
-        bail!("Rust index database must be outside its root");
     }
     if scope.is_some_and(|scope| !scope.starts_with(&idx.root)) {
         bail!("update scope is outside the index root");
@@ -647,15 +845,36 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     }
     let force = old_key.as_ref() != Some(&key);
     let scan_root = scope.unwrap_or(&idx.root);
-    let rules = ScanRules::new(idx);
+    let rules = ScanRules::with_exclusions(idx, extra_exclusions);
     let mut scanner = if existing {
         None
     } else {
-        Some(scan::Scanner::new(&idx.root, scan_root, rules.clone())?)
+        Some(scan::Scanner::with_jobs(
+            &idx.root,
+            scan_root,
+            rules.clone(),
+            jobs,
+        )?)
     };
     let mut pending = vec![scan_root.to_path_buf()];
+    let mut stat_pool =
+        (existing && jobs > 1).then(|| scan::StatPool::new(&idx.root, jobs as usize));
+    if let Some(pool) = &stat_pool {
+        pool.submit(scan_root.to_path_buf());
+    }
     let mut visited = HashSet::new();
     let mut report = UpdateReport::default();
+    if progress {
+        ui::enable_ansi();
+    }
+    let expected_dirs: u64 = if existing {
+        transaction
+            .query_row("SELECT COUNT(*) FROM directories", [], |row| row.get(0))
+            .map(|count: i64| count.max(0) as u64)?
+    } else {
+        0
+    };
+    let progress_started = Instant::now();
     let terminal = progress && std::io::stderr().is_terminal();
     let live_line = LiveLine(terminal);
     let label: String = idx.name.chars().take(12).collect();
@@ -696,7 +915,37 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             let Some(directory) = pending.pop() else {
                 break;
             };
-            let before = scan::read_stamp(&directory, &idx.root)?;
+            let before = match stat_pool
+                .as_mut()
+                .map(|pool| pool.take(&directory))
+                .unwrap_or_else(|| scan::stamp_io(&directory, &idx.root))
+            {
+                Ok(stamp) => stamp,
+                Err(error) => {
+                    let vanished = matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    );
+                    if directory == scan_root && vanished {
+                        return Err(error).with_context(|| {
+                            format!("cannot read {} (index unchanged)", directory.display())
+                        });
+                    }
+                    scan::warn_unreadable(&directory, &error);
+                    report.skipped += 1;
+                    if existing && !vanished {
+                        let stored = paths.encode(&directory)?;
+                        let id: Option<i64> = transaction
+                            .prepare_cached("SELECT id FROM directories WHERE path=?")?
+                            .query_row([stored.as_ref()], |row| row.get(0))
+                            .optional()?;
+                        if let Some(id) = id {
+                            retain_indexed(&transaction, &paths, &directory, id, &mut visited)?;
+                        }
+                    }
+                    continue;
+                }
+            };
             (directory, before, None)
         };
         let sql_start = profiling.then(Instant::now);
@@ -723,39 +972,65 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         if existing {
             visited.insert(id);
         }
-        if !force && previous.as_ref().is_some_and(|(_, old)| old == &before) {
+        if !force
+            && previous
+                .as_ref()
+                .is_some_and(|(_, old)| stamp_matches(old, &before))
+        {
             let children = transaction
                 .prepare_cached("SELECT name FROM children WHERE directory=? ORDER BY name")?
                 .query_map([id], |r| r.get::<_, Vec<u8>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            pending.extend(
-                children
-                    .into_iter()
-                    .rev()
-                    .map(|p| os_string(p).map(|name| directory.join(name)))
-                    .collect::<Result<Vec<_>>>()?,
-            );
+            let children = children
+                .into_iter()
+                .rev()
+                .map(|p| os_string(p).map(|name| directory.join(name)))
+                .collect::<Result<Vec<_>>>()?;
+            if let Some(pool) = &stat_pool {
+                for path in &children {
+                    pool.submit(path.clone());
+                }
+            }
+            pending.extend(children);
             report.reused += 1;
             report.scan_elapsed += scan_start.elapsed();
         } else {
-            // Abort instead of silently deleting unreadable directories from the
-            // index. Changes are committed only after the entire scan succeeds.
+            // An unreadable directory keeps its previous entries. Deleting them
+            // would treat a permission error as a removal.
             let children = if let Some(children) = prefetched {
                 children
             } else {
-                let mut children = fs::read_dir(&directory)
-                    .with_context(|| {
-                        format!("cannot read {} (index unchanged)", directory.display())
-                    })?
-                    .map(|entry| -> Result<_> {
-                        let entry = entry?;
-                        let kind = entry.file_type()?.is_dir();
-                        // Uses dirent.d_type, with stat only as a fallback.
-                        Ok((entry.file_name(), kind))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                children.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                children
+                write_scan_progress(
+                    terminal,
+                    &mut last,
+                    &label,
+                    (report.scanned + report.reused + report.skipped) as f64,
+                    expected_dirs,
+                    progress_started,
+                    &directory,
+                )?;
+                match read_children(&directory) {
+                    Ok(children) => children,
+                    Err(error) => {
+                        let vanished = matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        );
+                        if directory == scan_root && vanished {
+                            return Err(error).with_context(|| {
+                                format!("cannot read {} (index unchanged)", directory.display())
+                            });
+                        }
+                        scan::warn_unreadable(&directory, &error);
+                        report.skipped += 1;
+                        if previous.is_some() && !vanished {
+                            retain_indexed(&transaction, &paths, &directory, id, &mut visited)?;
+                        } else if existing {
+                            visited.remove(&id);
+                        }
+                        continue;
+                    }
+                }
             };
             report.scan_elapsed += scan_start.elapsed();
             let index_start = Instant::now();
@@ -775,19 +1050,37 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             let mut block_ids = Vec::new();
             data.clear();
             let mut names = 0;
-            for (name, is_dir) in children {
+            let indexed_children = children.clone();
+            let filter = listing_filter(&directory, &idx.database, &rules);
+            let child_total = children.len().max(1) as f64;
+            for (index, (name, is_dir)) in children.into_iter().enumerate() {
                 // Keep basenames like updatedb: full paths are only necessary
                 // for traversal or explicit path exclusions, not every file.
                 // Symlinks are indexed as records, never followed.
                 if is_dir && rules.directories.contains(&name) {
                     continue;
                 }
-                let path = (is_dir || !rules.paths.is_empty()).then(|| directory.join(&name));
-                if path
-                    .as_deref()
-                    .is_some_and(|path| rules.paths.iter().any(|blocked| path.starts_with(blocked)))
-                {
+                if entry_excluded(&directory, &name, is_dir, &filter) {
                     continue;
+                }
+                if index.is_multiple_of(256) {
+                    let partial = index as f64 / child_total;
+                    write_scan_progress(
+                        terminal,
+                        &mut last,
+                        &label,
+                        (report.scanned + report.reused + report.skipped) as f64 + partial,
+                        expected_dirs,
+                        progress_started,
+                        &directory,
+                    )?;
+                }
+                if is_dir && existing {
+                    let child = directory.join(&name);
+                    if let Some(pool) = &stat_pool {
+                        pool.submit(child.clone());
+                    }
+                    pending.push(child);
                 }
                 let name = name.as_encoded_bytes();
                 data.extend_from_slice(name);
@@ -813,9 +1106,6 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                     transaction
                         .prepare_cached("INSERT INTO children(directory,name) VALUES (?,?)")?
                         .execute(params![id, name])?;
-                    if existing {
-                        pending.push(path.context("directory path missing")?);
-                    }
                 }
             }
             if names > 0 {
@@ -843,11 +1133,20 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             if let Some(start) = metadata_start {
                 post_metadata_elapsed += start.elapsed();
             }
-            if before != after {
-                bail!(
-                    "directory changed during scan: {}; retry (index unchanged)",
-                    directory.display()
-                );
+            if !stamp_matches(&before, &after) {
+                let unchanged =
+                    listing_without_artifacts(&directory, &idx.database, &indexed_children);
+                let reread = read_children(&directory)
+                    .map(|entries| {
+                        listing_without_artifacts(&directory, &idx.database, &entries) == unchanged
+                    })
+                    .unwrap_or(false);
+                if artifact_names_in(&directory, &idx.database).is_empty() || !reread {
+                    bail!(
+                        "directory changed during scan: {}; retry (index unchanged)",
+                        directory.display()
+                    );
+                }
             }
             if previous.is_some() {
                 transaction
@@ -857,17 +1156,18 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             report.scanned += 1;
             report.index_elapsed += index_start.elapsed();
         }
-        if terminal && last.elapsed() >= Duration::from_millis(250) {
-            write!(
-                std::io::stderr(),
-                "\r\x1b[2K{}: {} scanned · {} reused dirs",
-                label,
-                report.scanned,
-                report.reused
-            )?;
-            std::io::stderr().flush()?;
-            last = Instant::now();
-        }
+        write_scan_progress(
+            terminal,
+            &mut last,
+            &label,
+            (report.scanned + report.reused + report.skipped) as f64,
+            expected_dirs,
+            progress_started,
+            &directory,
+        )?;
+    }
+    if let Some(scanner) = &scanner {
+        report.skipped += scanner.skipped();
     }
     drop(scanner);
     if profiling {
@@ -922,13 +1222,18 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     transaction.commit()?;
     report.finalize_elapsed = finalize_start.elapsed();
     drop(live_line);
-    ui::log(
-        Tone::Success,
-        format_args!(
+    let summary = if report.skipped == 0 {
+        format!(
             "{}: {} entries; {} dirs scanned, {} reused",
             idx.name, report.entries, report.scanned, report.reused
-        ),
-    );
+        )
+    } else {
+        format!(
+            "{}: {} entries; {} dirs scanned, {} reused, {} unreadable skipped",
+            idx.name, report.entries, report.scanned, report.reused, report.skipped
+        )
+    };
+    ui::log(Tone::Success, format_args!("{summary}"));
     ui::log(
         Tone::Info,
         format_args!(
@@ -945,3 +1250,25 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
 #[cfg(all(test, unix))]
 #[path = "../../../tests/unit/updatedb/index_builder.rs"]
 mod tests;
+
+#[cfg(test)]
+mod progress_tests {
+    use super::scan_progress;
+    use std::{path::Path, time::Duration};
+
+    #[test]
+    fn ratio_uses_previous_directory_count() {
+        let status = scan_progress(
+            50.0,
+            100,
+            Duration::from_secs(10),
+            Path::new("/data/Windows"),
+        );
+        assert!(status.contains("~50%"), "{status}");
+        assert!(status.contains("50/100"), "{status}");
+        assert!(status.contains("ETA ~0m10s"), "{status}");
+        assert!(status.contains("Windows"), "{status}");
+        let fresh = scan_progress(12.0, 0, Duration::from_secs(2), Path::new("c:/"));
+        assert!(fresh.contains("ETA unavailable"), "{fresh}");
+    }
+}

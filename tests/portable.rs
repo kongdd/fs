@@ -34,14 +34,17 @@ impl Fixture {
         }
         let cfg = Config {
             tools: Tools::default(),
+            engine: None,
             index: vec![IndexConfig {
                 name: "test".into(),
                 root,
                 database: base.join("index.db"),
+                update_database: None,
+                search_database: None,
                 filters: Filters::default(),
             }],
         };
-        fs_updatedb::indexer::build_indexes(&cfg, &[], &[], false, true).unwrap();
+        fs_updatedb::indexer::build_indexes(&cfg, &[], &[], false, true, 1).unwrap();
         Self { base, cfg }
     }
 
@@ -103,8 +106,15 @@ fn scoped_updates_limits_and_offline_queries() {
     )
     .unwrap();
     fs::write(idx.root.join("later.nc"), b"").unwrap();
-    fs_updatedb::indexer::build_indexes(&fixture.cfg, &[], &[idx.root.join("nested")], false, true)
-        .unwrap();
+    fs_updatedb::indexer::build_indexes(
+        &fixture.cfg,
+        &[],
+        &[idx.root.join("nested")],
+        false,
+        true,
+        1,
+    )
+    .unwrap();
     assert!(fixture.query("rain.nc").is_empty());
     assert_eq!(fixture.query("new.nc").len(), 1);
     assert!(fixture.query("later.nc").is_empty());
@@ -185,5 +195,5 @@ fn windows_path_patterns_and_scopes() {
     })
     .unwrap();
     assert_eq!(count, 2); // Directory record and its file.
-    assert!(fs_updatedb::indexer::build_indexes(&fixture.cfg, &[], &[], false, false,).is_err());
+    assert!(fs_updatedb::indexer::build_indexes(&fixture.cfg, &[], &[], false, false, 1).is_err());
 }

@@ -17,22 +17,46 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 #[path = "plocate.rs"]
 mod plocate;
 
+const MAX_SCAN_THREADS: u16 = 256;
+
+fn clamp_jobs(jobs: u16) -> u16 {
+    if jobs > MAX_SCAN_THREADS {
+        ui::log(
+            Tone::Warning,
+            format_args!(
+                "-j {jobs} exceeds {MAX_SCAN_THREADS}; using {MAX_SCAN_THREADS} scan threads"
+            ),
+        );
+        MAX_SCAN_THREADS
+    } else {
+        jobs.max(1)
+    }
+}
+
 pub fn build_indexes(
     cfg: &Config,
     names: &[String],
     folders: &[PathBuf],
     progress: bool,
     native: bool,
+    jobs: u16,
 ) -> Result<()> {
     if !native {
+        if jobs > 1 {
+            ui::log(
+                Tone::Warning,
+                format_args!("-j applies to the Rust engine only; plocate ignores it"),
+            );
+        }
         #[cfg(unix)]
         return plocate::build_indexes(cfg, names, folders, progress);
         #[cfg(windows)]
         bail!("plocate is unavailable on Windows; use --engine rust");
     }
+    let jobs = clamp_jobs(jobs);
     if folders.is_empty() {
         for idx in cfg.select(names)? {
-            build_one(idx, progress)?;
+            build_one(idx, progress, jobs)?;
         }
         return Ok(());
     }
@@ -98,11 +122,11 @@ pub fn build_indexes(
             continue;
         }
         if folder == root {
-            build_one(idx, progress)?;
+            build_one(idx, progress, jobs)?;
         } else {
             let _lock = lock_database(&idx.database)?;
             let scope = idx.root.join(folder.strip_prefix(root)?);
-            crate::index_builder::update(idx, Some(&scope), progress)?;
+            crate::index_builder::update_with_jobs(idx, Some(&scope), progress, jobs.into())?;
         }
     }
     Ok(())
@@ -152,7 +176,7 @@ impl Drop for Workspace {
     }
 }
 
-fn build_one(idx: &IndexConfig, progress: bool) -> Result<()> {
+fn build_one(idx: &IndexConfig, progress: bool, jobs: u16) -> Result<()> {
     if !idx.root.is_dir() {
         bail!(
             "index root does not exist or is not a directory: {}",
@@ -161,23 +185,39 @@ fn build_one(idx: &IndexConfig, progress: bool) -> Result<()> {
     }
     let _lock = lock_database(&idx.database)?;
     let start = Instant::now();
-    if idx.database.starts_with(&idx.root) {
-        bail!(
-            "Rust index database must be outside its root: {}",
-            idx.database.display()
+    if crate::platform::path_starts_with(&idx.database, &idx.root) {
+        ui::log(
+            Tone::Info,
+            format_args!(
+                "database is inside {}; excluding it and sqlite sidecars",
+                idx.root.display()
+            ),
         );
     }
     ui::log(
         Tone::Info,
-        format_args!("indexing {} [rust]: {}", idx.name, idx.root.display()),
+        format_args!(
+            "indexing {} [rust, {} threads]: {}",
+            idx.name,
+            jobs,
+            idx.root.display()
+        ),
     );
     if idx.database.exists() {
-        crate::index_builder::update(idx, None, progress)?;
+        crate::index_builder::update_with_jobs(idx, None, progress, jobs.into())?;
     } else {
         let workspace = Workspace::new(&idx.database)?;
         let mut temporary = idx.clone();
         temporary.database = workspace.0.join("index.db");
-        crate::index_builder::update(&temporary, None, progress)?;
+        // The lock file already sits beside the final database. Exclude it
+        // without recording it in the stored user-filter key.
+        crate::index_builder::update_with_exclusions(
+            &temporary,
+            None,
+            progress,
+            jobs.into(),
+            &crate::index_builder::artifact_paths(&idx.database),
+        )?;
         fs::OpenOptions::new()
             .write(true)
             .open(&temporary.database)?

@@ -55,6 +55,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then BIN="$BIN.exe"; fi
           python tests/integration/test-native.py "$BIN"
           python tests/integration/test-everything.py "$BIN"
+          python tests/integration/test-engine-default.py "$BIN"
       - name: Prepare plocate without system-wide indexing
         if: runner.os == 'Linux'
         timeout-minutes: 3

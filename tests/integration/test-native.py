@@ -35,14 +35,17 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     config.write_text('[tools]\nplocate="/does/not/exist"\nupdatedb="/does/not/exist"\n[filters]\nexclude_dirs=["excluded"]\nexclude_extensions=["tmp"]\n[[index]]\nname="native"\nroot=' + json.dumps(str(root)) + '\ndatabase=' + json.dumps(str(base / 'index.db')) + '\n')
 
     def run(*args, ok=True):
+        if args[0] in ('index', 'updatedb') and '--engine' not in args:
+            args = (*args, '--engine', 'rust')
         if args[0] == 'search':
             args = ('search', '--locate', *args[1:])
         result = subprocess.run([binary, '-c', str(config), *args], capture_output=True, timeout=30)
         assert (result.returncode == 0) == ok, (args, result.stderr)
         return result
 
-    run('doctor') # All platforms default to Rust; no external tools required.
+    # Missing DBs default to plocate; this suite explicitly builds Rust.
     run('updatedb', 'init', '--no-progress')
+    run('doctor') # Existing Rust indexes need no external tools.
     assert b'already exist' in run('index', 'init').stderr
     assert run('locate', '--files', '--ext', 'nc', 'soil').stdout
     run('ignore', 'add', 'nested')

@@ -1,6 +1,6 @@
 # fs
 
-解压与你的系统、架构对应的包即可使用，无需 Rust、Python 或 plocate。
+解压与你的系统、架构对应的包即可运行，无需 Rust 或 Python。默认使用 Rust 引擎，数据库可在各系统间复制。只有 Linux 可显式改用 plocate。
 
 | 系统 | 架构 | 包 |
 |---|---|---|
@@ -15,7 +15,7 @@ Linux / macOS：
 ```sh
 ./fs init
 # 编辑 ~/.config/fs/config.toml，设置扫描目录和数据库路径
-./fs updatedb
+./fs updatedb --engine rust
 ./fs locate soil
 ./fs stats
 ```
@@ -24,13 +24,15 @@ Windows PowerShell：
 
 ```powershell
 .\fs.exe init
-# 编辑 $HOME\.config\fs\config.toml，路径建议写成 C:/data
-.\fs.exe updatedb
+# 编辑 $HOME\.config\fs\config.toml，路径写成 C:/data 或 C:
+.\fs.exe updatedb --engine rust
 .\fs.exe locate soil
 .\fs.exe stats
 ```
 
-Unix 可运行 `sh install.sh` 安装到 `$HOME/.local/bin`；或将可执行文件直接放到 PATH 中。数据库必须位于扫描目录之外。Windows 输出路径使用 `/`。
+Unix 可运行 `sh install.sh` 安装到 `$HOME/.local/bin`；或将可执行文件直接放到 PATH 中。数据库可以放在扫描根目录之内，建库时会跳过数据库文件、锁文件和 SQLite 旁路文件。Windows 输出路径使用 `/`。
+
+默认引擎是 `rust`。Linux 可用 `fs config engine plocate` 改用 plocate；其他系统只有 `fs config engine rust`。也可临时用 `FS_ENGINE`。优先级为 `--engine` > `FS_ENGINE` > 配置文件 > 内置默认 `rust`。切换默认值不会转换已有 DB。
 
 旧 `NASFIND_CONFIG`、`~/.config/nasfind/config.toml` 配置入口仍可使用；`index / search` 保留为别名。**原生数据库仅支持当前 schema v4，旧 v1/v2/v3 库须使用新的数据库路径重建，不自动迁移或覆盖。** Unix 可显式使用 plocate 后端，其数据库不自动转换为原生格式。
 

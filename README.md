@@ -1,6 +1,6 @@
 # fs
 
-跨平台文件名索引与检索工具。默认原生 Rust 引擎，无需 updatedb/plocate；支持 Everything 表达式、增量更新、目录排除、离线查询和目录统计。
+跨平台文件名索引与检索工具。默认使用 Rust 引擎建库，数据库格式在各操作系统上相同。Linux 可显式改用 plocate。支持 Everything 表达式、增量更新、目录排除、离线查询和目录统计。
 
 ## 使用
 
@@ -8,12 +8,12 @@
 cargo build --release --bin fs
 ./target/release/fs init
 # 编辑 ~/.config/fs/config.toml，设置扫描目录和数据库路径
-./target/release/fs updatedb
+./target/release/fs updatedb --engine rust -j 8 # 跨平台；-j 为并行扫描线程数
 ./target/release/fs locate soil
 ./target/release/fs stats
 ```
 
-数据库必须位于扫描目录之外。配置示例见 [examples/](examples/)；Windows 路径建议写成 `C:/data`。
+路径统一用 `/`，包括 Windows 的 `C:/` 和网盘 `//server/share`，这样各系统生成的库可以互相查询。`updatedb` 在每台机器上扫描本机目录，写入该索引的 `database` 或 `update_database`。查询读取 `search_database`（通常是网盘上的库）；不指定索引名时，所有索引联合搜索，可用 `--path` 限制到某个网盘目录。配置示例见 [examples/](examples/)。
 
 配置查找顺序：`--config`、`FS_CONFIG`、旧 `NASFIND_CONFIG`、用户配置目录、系统配置目录。每个配置目录先找 `fs/config.toml`，再找旧 `nasfind/config.toml`；Windows 也查找 APPDATA。
 
@@ -24,7 +24,8 @@ cargo build --release --bin fs
 ## 常用命令
 
 ```sh
-fs updatedb                       # 更新所有索引，自动初始化缺失数据库
+fs updatedb                       # 默认 Rust，各系统数据库格式相同
+fs updatedb --engine rust -j 8    # 原生引擎；-j 控制扫描线程，默认 1
 fs updatedb research              # 只更新指定索引
 fs updatedb --folder /data/project # 只更新子目录，保留其他条目
 fs updatedb init                  # 只初始化缺失数据库
@@ -41,7 +42,19 @@ fs doctor
 
 查询默认匹配文件名、忽略 ASCII 大小写；索引查询不访问扫描目录，只有 `--existing` 检查结果是否仍存在。`--dirs / --files` 根据文件名后缀推断类型，不读取文件元数据。`--mnt` 保留 NAS 挂载路径输出映射。
 
-Unix 可显式使用 `fs updatedb --engine plocate`；此时需要外部 plocate/updatedb。Windows 仅支持原生数据库。Linux 私有工具安装脚本为 `scripts/tools/setup-plocate.py`，不会创建系统级扫描任务。
+默认引擎是 Rust，因此 Linux、macOS 和 Windows 建出的数据库可以互相复制使用。只有 Linux 能额外选择 plocate，且需要外部 plocate/updatedb；plocate 库不能在其他系统上查询。查询按已有 DB 格式自动选择后端，不受建库默认值影响。
+
+默认建库引擎可随时切换，无需重编译：
+
+```sh
+fs config engine rust      # 写入当前配置；非 Linux 只能设这个
+fs config engine plocate   # 仅 Linux
+fs config engine           # 查看当前生效的默认引擎
+export FS_ENGINE=rust      # 只影响当前进程，优先于配置文件
+fs updatedb --engine rust  # 只影响这一次命令
+```
+
+优先级为 `--engine` > `FS_ENGINE` > 配置文件 `engine` > 内置默认 `rust`。切换默认值不会转换已有数据库，更新仍须选择与 DB 相符的后端。Linux 私有工具安装脚本为 `scripts/tools/setup-plocate.py`，不会创建系统级扫描任务。
 
 ## 布局
 

@@ -7,6 +7,7 @@ cargo test --locked --workspace --all-targets
 cargo build --locked --bin fs
 python3 tests/integration/test-native.py target/debug/fs
 python3 tests/integration/test-everything.py target/debug/fs
+python3 tests/integration/test-engine-default.py target/debug/fs
 ```
 
 Windows 可执行文件为 `fs.exe`。Everything 测试默认使用原生引擎；PATH 中有 plocate/updatedb 时额外验证同一组表达式。

@@ -19,6 +19,8 @@ fn discovers_spaced_names_at_any_depth_without_following_excluded_trees() {
         name: "test".into(),
         root: root.clone(),
         database: root.join("test.db"),
+        update_database: None,
+        search_database: None,
         filters: crate::config::Filters {
             exclude_dirs: vec!["node_modules".into(), "System Volume Information".into()],
             exclude_paths: vec!["cache".into()],

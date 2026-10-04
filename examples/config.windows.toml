@@ -1,4 +1,5 @@
-# Use absolute paths; keep databases outside scanned directories.
+# Use absolute paths. A bare drive letter such as C: means that drive's root.
+# Databases may live inside the scanned root; the db, its lock, and SQLite sidecars are skipped.
 [filters]
 exclude_dirs = [".git", "node_modules", "$RECYCLE.BIN", "System Volume Information"]
 
@@ -6,3 +7,5 @@ exclude_dirs = [".git", "node_modules", "$RECYCLE.BIN", "System Volume Informati
 name = "files"
 root = "C:/Users"
 database = "C:/nasfind/files.db"
+# update_database = "D:/nasfind/files-build.db"
+# search_database = "C:/nasfind/files.db"

@@ -1,7 +1,7 @@
 //! Trigram candidate selection with exact byte-safe matching.
 use anyhow::Result;
-pub use fs_core::native::{directory_counts, is_native};
-use fs_core::{config::IndexConfig, native::grams, platform::normalize, query::SearchOptions};
+pub use fs_core::index_store::{directory_counts, is_rust_index};
+use fs_core::{config::IndexConfig, index_store::grams, platform::normalize, query::SearchOptions};
 
 pub struct Query {
     matcher: crate::matching::Query,
@@ -57,7 +57,7 @@ pub fn visit(
     query: &Query,
     visitor: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<bool> {
-    fs_core::native::visit(
+    fs_core::index_store::visit(
         idx,
         &query.grams,
         query.basename,
@@ -80,7 +80,7 @@ pub fn visit_filtered(
     } else {
         1
     };
-    fs_core::native::visit_filtered(
+    fs_core::index_store::visit_filtered(
         idx,
         &query.grams,
         query.basename,

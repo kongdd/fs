@@ -1,13 +1,13 @@
-//! Native incremental scanner and index writer.
+//! Rust index builder and incremental directory scanner.
 use crate::{
     config::IndexConfig,
     platform::{directory_stamp as stamp, os_string, path_bytes, path_from_bytes},
     ui::{self, Tone},
 };
 use anyhow::{Context, Result, bail};
-use fs_core::native::{
-    APPLICATION_ID, BLOCK_SIZE, MAX_BLOCK_BYTES, VERSION, grams, is_native, pack, push_varint,
-    trigram_keys, unpack, validate,
+use fs_core::index_store::{
+    APPLICATION_ID, BLOCK_SIZE, DirectoryPaths, MAX_BLOCK_BYTES, VERSION, grams, is_rust_index,
+    pack, push_varint, trigram_keys, unpack, validate,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -17,7 +17,9 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+mod directory_grams;
 mod scan;
+use directory_grams::DirectoryGrams;
 
 fn schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
@@ -30,7 +32,8 @@ fn schema(connection: &Connection) -> Result<()> {
         CREATE TABLE children(directory INTEGER NOT NULL, name BLOB NOT NULL,
             PRIMARY KEY(directory,name)) WITHOUT ROWID;
         CREATE TABLE postings(gram INTEGER PRIMARY KEY, data BLOB NOT NULL, n INTEGER NOT NULL);
-        CREATE TABLE directory_grams(directory INTEGER PRIMARY KEY, data BLOB NOT NULL);
+        CREATE TABLE directory_grams(directory INTEGER PRIMARY KEY, data BLOB NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0);
     "
     ))?;
     Ok(())
@@ -67,7 +70,6 @@ pub struct UpdateReport {
 
 fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(
-        path_bytes(&idx.root),
         &idx.filters.exclude_dirs,
         idx.filters
             .exclude_paths
@@ -187,17 +189,10 @@ fn store_directory_grams(
     connection: &Connection,
     directory: i64,
     lists: &HashMap<u32, Vec<u64>>,
+    codec: &mut DirectoryGrams,
 ) -> Result<()> {
     let keys = lists.keys().map(|&gram| u64::from(gram)).collect();
-    store_directory_keys(connection, directory, keys)
-}
-
-fn store_directory_keys(connection: &Connection, directory: i64, mut keys: Vec<u64>) -> Result<()> {
-    keys.sort_unstable();
-    connection
-        .prepare_cached("INSERT INTO directory_grams(directory,data) VALUES (?,?)")?
-        .execute(params![directory, pack(&keys)])?;
-    Ok(())
+    codec.store(connection, directory, keys)
 }
 
 #[derive(Default)]
@@ -456,10 +451,15 @@ impl DirectoryPostings<'_> {
         }
     }
 
-    fn finish(self, connection: &Connection, directory: i64) -> Result<()> {
+    fn finish(
+        self,
+        connection: &Connection,
+        directory: i64,
+        codec: &mut DirectoryGrams,
+    ) -> Result<()> {
         match self {
             Self::Fresh { postings, keys, .. } => {
-                store_directory_keys(connection, directory, keys)?;
+                codec.store(connection, directory, keys)?;
                 // Bounds encoded accumulation, not total RSS: lookup pages,
                 // one directory and one final posting remain additional costs.
                 if postings.buffered_bytes >= postings.byte_limit {
@@ -468,7 +468,7 @@ impl DirectoryPostings<'_> {
                 Ok(())
             }
             Self::Update { postings, lists } => {
-                postings.add(connection, directory, lists)?;
+                postings.add(connection, directory, lists, codec)?;
                 postings.flush(connection)
             }
         }
@@ -511,8 +511,9 @@ impl PostingBatch {
         connection: &Connection,
         directory: i64,
         lists: HashMap<u32, Vec<u64>>,
+        codec: &mut DirectoryGrams,
     ) -> Result<()> {
-        store_directory_grams(connection, directory, &lists)?;
+        store_directory_grams(connection, directory, &lists, codec)?;
         for (gram, ids) in lists {
             self.count += ids.len();
             self.lists.entry(gram).or_default().extend(ids);
@@ -547,10 +548,12 @@ impl PostingBatch {
     }
 }
 
-fn clear_postings(connection: &Connection, directory: i64) -> Result<()> {
-    let data: Vec<u8> = connection
-        .prepare_cached("SELECT data FROM directory_grams WHERE directory=?")?
-        .query_row([directory], |r| r.get(0))?;
+fn clear_postings(
+    connection: &Connection,
+    directory: i64,
+    codec: &mut DirectoryGrams,
+) -> Result<()> {
+    let keys = codec.read(connection, directory)?;
     let old_ids = connection
         .prepare_cached("SELECT id FROM blocks WHERE directory=? ORDER BY id")?
         .query_map([directory], |r| r.get::<_, i64>(0))?
@@ -558,7 +561,7 @@ fn clear_postings(connection: &Connection, directory: i64) -> Result<()> {
     let mut select = connection.prepare_cached("SELECT data FROM postings WHERE gram=?")?;
     let mut update = connection.prepare_cached("UPDATE postings SET data=?,n=? WHERE gram=?")?;
     let mut delete = connection.prepare_cached("DELETE FROM postings WHERE gram=?")?;
-    for gram in unpack(&data)? {
+    for gram in keys {
         let data: Vec<u8> = select.query_row([gram as i64], |r| r.get(0))?;
         let mut ids = unpack(&data)?;
         ids.retain(|&id| old_ids.binary_search(&(id as i64)).is_err());
@@ -595,7 +598,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         bail!("update scope is outside the index root");
     }
     let existing = idx.database.exists();
-    if existing && !is_native(&idx.database)? {
+    if existing && !is_rust_index(&idx.database)? {
         bail!(
             "{} is a legacy plocate index; use a NEW database path for the Rust engine, or --engine plocate",
             idx.database.display()
@@ -616,15 +619,23 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     } else {
         validate(&transaction)?;
     }
+    let mut gram_codec = DirectoryGrams::new(&transaction)?;
+    if !existing {
+        gram_codec.stage_fresh(&transaction)?;
+    }
     let stored_root: Option<Vec<u8>> = transaction
         .query_row("SELECT value FROM meta WHERE key='root'", [], |r| r.get(0))
         .optional()?;
+    if existing && stored_root.is_none() {
+        bail!("corrupt index: missing root");
+    }
     if stored_root
         .as_deref()
         .is_some_and(|root| root != path_bytes(&idx.root).as_ref())
     {
         bail!("index root changed; use a new database path");
     }
+    let paths = DirectoryPaths::relative(path_bytes(&idx.root).to_vec())?;
     let key = filter_key(idx)?;
     let old_key: Option<Vec<u8>> = transaction
         .query_row("SELECT value FROM meta WHERE key='filters'", [], |r| {
@@ -662,11 +673,11 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             "INSERT INTO meta(key,value) VALUES ('root',?)",
             [root.as_ref()],
         )?;
-        let mut postings = batch.directory(&[]);
-        let mut data = root.to_vec();
-        data.push(0);
-        write_block(&transaction, 0, &data, 1, &[], &mut postings, &mut encoder)?;
-        postings.finish(&transaction, 0)?;
+        let root_grams = grams(&root);
+        let mut postings = batch.directory(&root_grams);
+        // Root is a marker; the full root string lives only in meta.root.
+        write_block(&transaction, 0, b"\0", 1, &[], &mut postings, &mut encoder)?;
+        postings.finish(&transaction, 0, &mut gram_codec)?;
     }
     let profiling = ["FS_SCAN_PROFILE", "NASFIND_SCAN_PROFILE"]
         .iter()
@@ -689,12 +700,11 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             (directory, before, None)
         };
         let sql_start = profiling.then(Instant::now);
+        let stored_path = paths.encode(&directory)?;
         let previous: Option<(i64, Vec<u8>)> = if existing {
             transaction
                 .prepare_cached("SELECT id,stamp FROM directories WHERE path=?")?
-                .query_row([path_bytes(&directory).as_ref()], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
+                .query_row([stored_path.as_ref()], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?
         } else {
             None
@@ -704,7 +714,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
         } else {
             transaction
                 .prepare_cached("INSERT INTO directories(path,stamp) VALUES (?,?)")?
-                .execute(params![path_bytes(&directory).as_ref(), &before])?;
+                .execute(params![stored_path.as_ref(), &before])?;
             transaction.last_insert_rowid()
         };
         if let Some(start) = sql_start {
@@ -750,7 +760,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
             report.scan_elapsed += scan_start.elapsed();
             let index_start = Instant::now();
             if previous.is_some() {
-                clear_postings(&transaction, id)?;
+                clear_postings(&transaction, id, &mut gram_codec)?;
                 transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
                 transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
             }
@@ -827,7 +837,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
                     postings.common_blocks(gram, &block_ids);
                 }
             }
-            postings.finish(&transaction, id)?;
+            postings.finish(&transaction, id, &mut gram_codec)?;
             let metadata_start = profiling.then(Instant::now);
             let after = stamp(&directory_metadata(&directory, &idx.root)?);
             if let Some(start) = metadata_start {
@@ -874,7 +884,7 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     batch.flush(&transaction)?;
     if !existing {
         // Bulk index construction avoids per-directory B-tree maintenance and
-        // leaves the same v2 lookup/uniqueness guarantees on committed indexes.
+        // leaves the same lookup/uniqueness guarantees on committed indexes.
         transaction.execute_batch(
             "CREATE UNIQUE INDEX directory_paths ON directories(path);
              CREATE INDEX directory_blocks ON blocks(directory);",
@@ -889,14 +899,19 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
     } else {
         Vec::new()
     };
+    let stored_scope = paths.encode(scan_root)?;
+    let stored_scope = path_from_bytes(&stored_scope)?;
     for (id, path) in old_directories {
         let path = path_from_bytes(&path)?;
-        if path.starts_with(scan_root) && !visited.contains(&id) {
-            clear_postings(&transaction, id)?;
+        if path.starts_with(stored_scope.as_ref()) && !visited.contains(&id) {
+            clear_postings(&transaction, id, &mut gram_codec)?;
             transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
             transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
             transaction.execute("DELETE FROM directories WHERE id=?", [id])?;
         }
+    }
+    if !existing {
+        gram_codec.finish_fresh(&transaction)?;
     }
     if force {
         transaction.execute("INSERT INTO meta(key,value) VALUES ('filters',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&key])?;
@@ -928,5 +943,5 @@ pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result
 }
 
 #[cfg(all(test, unix))]
-#[path = "../../../tests/unit/updatedb/native.rs"]
+#[path = "../../../tests/unit/updatedb/index_builder.rs"]
 mod tests;

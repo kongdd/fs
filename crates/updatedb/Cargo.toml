@@ -12,7 +12,7 @@ fs-core = { path = "../core" }
 anyhow.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
-zstd.workspace = true
+zstd = { workspace = true, features = ["zdict_builder"] }
 
 [dev-dependencies]
 fs-locate = { path = "../locate" }

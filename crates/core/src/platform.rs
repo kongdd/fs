@@ -117,6 +117,8 @@ pub fn file_identity(metadata: &Metadata) -> (i64, i64, u64) {
     }
 }
 
+/// Directory identity/change marker with whole-second timestamps.
+/// Changes within the same second can be missed, including during a scan.
 pub fn directory_stamp(metadata: &Metadata) -> Vec<u8> {
     #[cfg(unix)]
     let values = {
@@ -125,17 +127,15 @@ pub fn directory_stamp(metadata: &Metadata) -> Vec<u8> {
             metadata.dev(),
             metadata.ino(),
             metadata.mtime() as u64,
-            metadata.mtime_nsec() as u64,
             metadata.ctime() as u64,
-            metadata.ctime_nsec() as u64,
         ]
     };
     #[cfg(windows)]
     let values = {
         use std::os::windows::fs::MetadataExt;
         [
-            metadata.creation_time(),
-            metadata.last_write_time(),
+            metadata.creation_time() / 10_000_000,
+            metadata.last_write_time() / 10_000_000,
             metadata.file_size(),
             u64::from(metadata.file_attributes()),
         ]

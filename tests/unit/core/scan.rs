@@ -13,11 +13,11 @@ fn fixture() -> Connection {
 }
 
 fn populate(connection: &Connection) {
-    connection.execute_batch("CREATE TABLE blocks(id INTEGER PRIMARY KEY,data BLOB,directory INTEGER,size INTEGER,n INTEGER); CREATE TABLE directories(id INTEGER PRIMARY KEY,path BLOB); INSERT INTO directories VALUES(1,X'2f726f6f74');").unwrap();
+    connection.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value BLOB); INSERT INTO meta VALUES('root',X'2f726f6f74'); CREATE TABLE blocks(id INTEGER PRIMARY KEY,data BLOB,directory INTEGER,size INTEGER,n INTEGER); CREATE TABLE directories(id INTEGER PRIMARY KEY,path BLOB); INSERT INTO directories VALUES(1,X'');").unwrap();
     connection
         .execute(
-            "INSERT INTO blocks VALUES(0,?,0,6,1)",
-            [zstd::bulk::compress(b"/root\0", 1).unwrap()],
+            "INSERT INTO blocks VALUES(0,?,0,1,1)",
+            [zstd::bulk::compress(b"\0", 1).unwrap()],
         )
         .unwrap();
     for number in 1..=900 {
@@ -112,8 +112,22 @@ fn parallel_matches_serial_in_order_with_raw_bytes_and_path_predicates() {
 }
 
 #[test]
+fn relative_directories_and_root_marker_produce_full_paths() {
+    let connection = fixture();
+    let found = collect(&connection, false, 4, false);
+    assert_eq!(found[0], b"/root");
+    assert!(found[1..].iter().all(|path| path.starts_with(b"/root/")));
+    for bad in [b"/outside".as_slice(), b"../outside", b"bad\0path"] {
+        connection
+            .execute("UPDATE directories SET path=?", [bad])
+            .unwrap();
+        assert!(run(&connection, 4, is_py, |_| Ok(true)).is_err());
+    }
+}
+
+#[test]
 fn invalid_directory_paths_fail_only_when_reached() {
-    for prefix in [b"".as_slice(), b"/bad\0prefix"] {
+    for prefix in [b"../outside".as_slice(), b"/bad\0prefix"] {
         let connection = fixture();
         connection
             .execute("INSERT INTO directories VALUES(2,?)", [prefix])
@@ -317,7 +331,7 @@ fn directory_lookup_and_block_read_share_one_snapshot_during_update() {
     connection.execute_batch("PRAGMA journal_mode=WAL").unwrap();
     populate(&connection);
     connection
-        .execute("INSERT INTO directories VALUES(2,X'2f6c617465')", [])
+        .execute("INSERT INTO directories VALUES(2,X'6c617465')", [])
         .unwrap();
     connection
         .execute("UPDATE blocks SET directory=2 WHERE id>=600", [])
@@ -329,9 +343,9 @@ fn directory_lookup_and_block_read_share_one_snapshot_during_update() {
         run(&transaction, 4, is_py, |p| {
             count += 1;
             if count == 1 {
-                writer.execute_batch("UPDATE directories SET path=X'2f6368616e676564'; UPDATE blocks SET n=20 WHERE id>=600;").unwrap();
+                writer.execute_batch("UPDATE directories SET path=X'6368616e676564'; UPDATE blocks SET n=20 WHERE id>=600;").unwrap();
             }
-            assert!(p.starts_with(if count < 600 { b"/root/" } else { b"/late/" }));
+            assert!(p.starts_with(if count < 600 { b"/root/".as_slice() } else { b"/root/late/" }));
             Ok(true)
         }).unwrap();
         assert_eq!(count, 900);

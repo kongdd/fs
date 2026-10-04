@@ -8,6 +8,38 @@ fn native_strings_roundtrip() {
     assert_eq!(path_from_bytes(&path_bytes(&path)).unwrap(), path);
 }
 
+#[test]
+fn directory_stamp_keeps_identity_and_whole_seconds() {
+    let metadata = std::fs::metadata(std::env::temp_dir()).unwrap();
+    #[cfg(unix)]
+    let expected = {
+        use std::os::unix::fs::MetadataExt;
+        [
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mtime() as u64,
+            metadata.ctime() as u64,
+        ]
+    };
+    #[cfg(windows)]
+    let expected = {
+        use std::os::windows::fs::MetadataExt;
+        [
+            metadata.creation_time() / 10_000_000,
+            metadata.last_write_time() / 10_000_000,
+            metadata.file_size(),
+            u64::from(metadata.file_attributes()),
+        ]
+    };
+    let stamp = directory_stamp(&metadata);
+    assert_eq!(stamp.len(), 32);
+    let actual: Vec<u64> = stamp
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_surrogates_roundtrip_and_corruption_is_rejected() {

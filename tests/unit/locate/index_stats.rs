@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{Filters, IndexConfig, Tools};
-use fs_updatedb::native as writer;
+use fs_updatedb::index_builder as writer;
 use std::{ffi::OsString, fs, os::unix::ffi::OsStringExt};
 
 struct Fixture {
@@ -94,6 +94,8 @@ fn metadata_counts_match_paths_across_updates_and_offline_roots() {
     let fixture = Fixture::new();
     fixture.check();
     let root = &fixture.cfg.index[0].root;
+    // Mutate in a later second than the stored directory stamp.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     fs::rename(root.join("a.nc"), root.join("nested/new.nc")).unwrap();
     fs::remove_dir_all(root.join("nested/deep")).unwrap();
     writer::update(&fixture.cfg.index[0], None, false).unwrap();
@@ -106,6 +108,8 @@ fn metadata_counts_match_paths_across_updates_and_offline_roots() {
 fn metadata_counts_cover_empty_and_symbolic_roots() {
     let mut fixture = Fixture::new();
     let root = fixture.cfg.index[0].root.clone();
+    // The filesystem may reuse the inode when recreating the empty root.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     fs::remove_dir_all(&root).unwrap();
     fs::create_dir(&root).unwrap();
     writer::update(&fixture.cfg.index[0], None, false).unwrap();

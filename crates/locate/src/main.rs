@@ -1,4 +1,4 @@
-use fs_locate::{config, ignore, native, platform, search, stats, ui};
+use fs_locate::{config, ignore, index_search, platform, search, stats, ui};
 use fs_updatedb::indexer;
 
 use std::{
@@ -224,7 +224,7 @@ fn doctor(config_path: Option<&Path>) -> Result<()> {
     let mut legacy = false;
     for idx in &cfg.index {
         // Missing indexes use Rust; validate every existing DB.
-        legacy |= idx.database.is_file() && !native::is_native(&idx.database)?;
+        legacy |= idx.database.is_file() && !index_search::is_rust_index(&idx.database)?;
     }
     if legacy {
         check_command(&cfg.tools.plocate, "--version")?;

@@ -1,14 +1,20 @@
 use super::*;
 use crate::config::Filters;
-use fs_core::native::{BlockReader, open_read};
+use fs_core::index_store::{BlockReader, open_read};
 use fs_locate::{
-    native::{Query, visit},
+    index_search::{Query, visit},
     search::SearchOptions,
 };
 use std::os::unix::{
     ffi::{OsStrExt, OsStringExt},
     fs::MetadataExt,
 };
+
+// Incremental-update tests mutate in a later second: subsecond changes are
+// intentionally outside the directory stamp's detection guarantee.
+fn next_stamp_second() {
+    std::thread::sleep(Duration::from_millis(1100));
+}
 
 struct Fixture {
     _workspace: PathBuf,
@@ -74,7 +80,7 @@ fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let full_checks = AtomicUsize::new(0);
     let mut result = Vec::new();
-    fs_core::native::visit_filtered(
+    fs_core::index_store::visit_filtered(
         &fixture.idx,
         &[],
         false,
@@ -104,7 +110,7 @@ fn basename_predicate_runs_before_full_paths_and_keeps_block_validation() {
     let connection = rusqlite::Connection::open(&fixture.idx.database).unwrap();
     connection.execute("UPDATE blocks SET n=n+1", []).unwrap();
     assert!(
-        fs_core::native::visit_filtered(
+        fs_core::index_store::visit_filtered(
             &fixture.idx,
             &[],
             true,
@@ -203,6 +209,7 @@ fn bulk_build_creates_complete_indexes_and_deduplicated_postings() {
     let zzz = trigram_keys(b"zzz").next().unwrap();
     for removed in [false, true] {
         if removed {
+            next_stamp_second();
             fs::remove_file(fixture.idx.root.join("zzzzzz.nc")).unwrap();
             update(&fixture.idx, None, false).unwrap();
         }
@@ -244,12 +251,14 @@ fn reuse_checks_descendants_and_handles_deletion_and_rename() {
     let second = update(&fixture.idx, None, false).unwrap();
     assert_eq!(second.scanned, 0);
     assert_eq!(second.reused, 2);
+    next_stamp_second();
     fs::rename(nested.join("before.nc"), nested.join("after.nc")).unwrap();
     let changed = update(&fixture.idx, None, false).unwrap();
     assert_eq!(changed.scanned, 1);
     assert_eq!(changed.reused, 1);
     assert!(fixture.query(&["before.nc"], true, false, false).is_empty());
     assert_eq!(fixture.query(&["after.nc"], true, false, false).len(), 1);
+    next_stamp_second();
     fs::remove_dir_all(nested).unwrap();
     update(&fixture.idx, None, false).unwrap();
     assert!(fixture.query(&["after.nc"], true, false, false).is_empty());
@@ -300,6 +309,7 @@ fn partial_update_preserves_other_subtrees_and_rollback_preserves_old_index() {
         fs::write(fixture.idx.root.join(name).join("old.nc"), b"").unwrap();
     }
     update(&fixture.idx, None, false).unwrap();
+    next_stamp_second();
     fs::write(fixture.idx.root.join("left/new.nc"), b"").unwrap();
     fs::write(fixture.idx.root.join("right/new.nc"), b"").unwrap();
     update(&fixture.idx, Some(&fixture.idx.root.join("left")), false).unwrap();
@@ -393,6 +403,7 @@ fn blocks_cover_boundaries_and_never_combine_different_filenames() {
             1
         );
     }
+    next_stamp_second();
     fs::remove_file(fixture.idx.root.join("entry_032.nc")).unwrap();
     fs::rename(
         fixture.idx.root.join("entry_064.nc"),
@@ -411,9 +422,12 @@ fn block_codec_preserves_raw_bytes_and_rejects_corruption() {
     let connection = Connection::open_in_memory().unwrap();
     schema(&connection).unwrap();
     connection
+        .execute("INSERT INTO meta(key,value) VALUES ('root',?)", [b"/root"])
+        .unwrap();
+    connection
         .execute(
             "INSERT INTO directories(path,stamp) VALUES (?,?)",
-            params![b"/root", b""],
+            params![b"", b""],
         )
         .unwrap();
     let mut encoder = BlockEncoder::new().unwrap();
@@ -477,16 +491,23 @@ fn posting_batch_flushes_and_merges_sorted_unique_ids() {
     let connection = Connection::open_in_memory().unwrap();
     schema(&connection).unwrap();
     let mut batch = PostingBatch::default();
+    let mut codec = DirectoryGrams::new(&connection).unwrap();
     batch
         .add(
             &connection,
             1,
             HashMap::from([(123, (1..=262_144).collect())]),
+            &mut codec,
         )
         .unwrap();
     assert_eq!(batch.count, 0);
     batch
-        .add(&connection, 2, HashMap::from([(123, vec![262_145])]))
+        .add(
+            &connection,
+            2,
+            HashMap::from([(123, vec![262_145])]),
+            &mut codec,
+        )
         .unwrap();
     batch.flush(&connection).unwrap();
     let (data, n): (Vec<u8>, i64) = connection
@@ -699,7 +720,13 @@ fn fresh_directory_stream_matches_full_path_grams_across_spills() {
                 }
             }
         }
-        postings.finish(&connection, directory).unwrap();
+        postings
+            .finish(
+                &connection,
+                directory,
+                &mut DirectoryGrams::new(&connection).unwrap(),
+            )
+            .unwrap();
         let data: Vec<u8> = connection
             .query_row(
                 "SELECT data FROM directory_grams WHERE directory=?",
@@ -795,7 +822,7 @@ fn fresh_build_bulk_directory_index_preserves_unique_paths() {
         connection
             .execute(
                 "INSERT INTO directories(path,stamp) VALUES (?,?)",
-                params![fixture.idx.root.as_os_str().as_bytes(), b""]
+                params![b"", b""]
             )
             .is_err()
     );
@@ -902,15 +929,190 @@ fn fresh_scanner_batches_large_directories_and_cancels_cleanly() {
 }
 
 #[test]
-fn old_schema_is_rejected_without_overwriting() {
+fn compressed_reverse_grams_support_replacement_and_rollback() {
     let fixture = Fixture::new();
+    fs::write(fixture.idx.root.join("old.nc"), b"").unwrap();
     update(&fixture.idx, None, false).unwrap();
-    Connection::open(&fixture.idx.database)
-        .unwrap()
-        .execute_batch("PRAGMA user_version=1")
-        .unwrap();
+    {
+        let connection = Connection::open(&fixture.idx.database).unwrap();
+        // Use the existing raw lists as a dictionary to exercise compressed
+        // incremental updates even in a deliberately small filesystem fixture.
+        let dictionary: Vec<u8> = connection
+            .query_row(
+                "SELECT data FROM directory_grams WHERE directory=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES ('directory_grams_dictionary',?)",
+                [&dictionary],
+            )
+            .unwrap();
+        let mut codec = DirectoryGrams::new(&connection).unwrap();
+        let mut rows = connection
+            .prepare("SELECT directory,data FROM directory_grams")
+            .unwrap();
+        let data = rows
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for (directory, raw) in data {
+            connection
+                .execute("DELETE FROM directory_grams WHERE directory=?", [directory])
+                .unwrap();
+            codec
+                .store(&connection, directory, unpack(&raw).unwrap())
+                .unwrap();
+        }
+        assert!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM directory_grams WHERE size>0",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                > 0
+        );
+    }
     let before = fs::read(&fixture.idx.database).unwrap();
-    assert!(is_native(&fixture.idx.database).is_err());
-    assert!(update(&fixture.idx, None, false).is_err());
+    assert!(update(&fixture.idx, Some(&fixture.idx.root.join("missing")), false).is_err());
     assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+    next_stamp_second();
+    fs::rename(
+        fixture.idx.root.join("old.nc"),
+        fixture.idx.root.join("new.nc"),
+    )
+    .unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    assert!(fixture.query(&["old.nc"], true, false, false).is_empty());
+    assert_eq!(fixture.query(&["new.nc"], true, false, false).len(), 1);
+    next_stamp_second();
+    fs::remove_file(fixture.idx.root.join("new.nc")).unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    assert!(fixture.query(&["new.nc"], true, false, false).is_empty());
+}
+
+#[test]
+fn root_is_stored_once_and_relative_paths_preserve_full_path_search() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.idx.root.join("nested/deep")).unwrap();
+    fs::write(fixture.idx.root.join("nested/deep/file.nc"), b"").unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    let connection = open_read(&fixture.idx.database).unwrap();
+    let stored: Vec<Vec<u8>> = connection
+        .prepare("SELECT path FROM directories ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        stored,
+        [b"".to_vec(), b"nested".to_vec(), b"nested/deep".to_vec()]
+    );
+    let (data, size): (Vec<u8>, i64) = connection
+        .query_row("SELECT data,size FROM blocks WHERE directory=0", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(size, 1);
+    assert_eq!(zstd::bulk::decompress(&data, 1).unwrap(), b"\0");
+    let filters: Vec<u8> = connection
+        .query_row("SELECT value FROM meta WHERE key='filters'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&filters)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let full = fixture.idx.root.join("nested/deep/file.nc");
+    assert_eq!(
+        fixture.query(&[full.to_str().unwrap()], false, false, false),
+        [path_bytes(&full).to_vec()]
+    );
+    assert_eq!(
+        fixture
+            .query(&[fixture.idx.root.to_str().unwrap()], false, false, false)
+            .len(),
+        4
+    );
+    let before = fs::read(&fixture.idx.database).unwrap();
+    assert_eq!(update(&fixture.idx, None, false).unwrap().scanned, 0);
+    assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+    next_stamp_second();
+    fs::remove_dir_all(fixture.idx.root.join("nested/deep")).unwrap();
+    update(&fixture.idx, Some(&fixture.idx.root.join("nested")), false).unwrap();
+    assert!(fixture.query(&["file.nc"], true, false, false).is_empty());
+}
+
+#[test]
+fn relative_paths_validate_components_and_handle_root_boundaries() {
+    for root in [b"/".as_slice(), b"/data", b"/data/"] {
+        let paths = DirectoryPaths::relative(root.to_vec()).unwrap();
+        assert_eq!(paths.resolve(Vec::new()).unwrap(), root);
+        let full = Path::new(std::str::from_utf8(root).unwrap()).join("child");
+        assert_eq!(paths.encode(&full).unwrap().as_ref(), b"child");
+        assert_eq!(
+            paths.resolve(b"child".to_vec()).unwrap(),
+            path_bytes(&full).as_ref()
+        );
+        for invalid in [
+            b"/absolute".as_slice(),
+            b"../outside",
+            b"a/../b",
+            b"a//b",
+            b"./child",
+            b"bad\0path",
+        ] {
+            assert!(paths.resolve(invalid.to_vec()).is_err());
+        }
+    }
+    let paths = DirectoryPaths::relative(b"/data".to_vec()).unwrap();
+    assert!(paths.encode(Path::new("/data-other/child")).is_err());
+    assert_eq!(
+        paths.resolve(b"bad_\xff".to_vec()).unwrap(),
+        b"/data/bad_\xff"
+    );
+}
+
+#[test]
+fn unsupported_schemas_are_rejected_without_overwriting() {
+    for version in [1, 2, 3, VERSION + 1] {
+        let fixture = Fixture::new();
+        update(&fixture.idx, None, false).unwrap();
+        Connection::open(&fixture.idx.database)
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version={version};"))
+            .unwrap();
+        let before = fs::read(&fixture.idx.database).unwrap();
+        assert!(
+            is_rust_index(&fixture.idx.database)
+                .unwrap_err()
+                .to_string()
+                .contains("rebuild")
+        );
+        let connection = open_read(&fixture.idx.database).unwrap();
+        assert!(
+            validate(&connection)
+                .unwrap_err()
+                .to_string()
+                .contains("rebuild")
+        );
+        assert!(update(&fixture.idx, None, false).is_err());
+        let options = SearchOptions {
+            patterns: vec!["*".into()],
+            ..Default::default()
+        };
+        assert!(visit(&fixture.idx, &Query::new(&options).unwrap(), |_| Ok(true)).is_err());
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+    }
 }

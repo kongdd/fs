@@ -6,6 +6,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def encoded(path):
@@ -100,6 +101,8 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     assert (base / 'index.db').read_bytes() == before
     initial_stats = run('stats', '-n10').stdout
     assert b'building stats cache' not in run('stats').stderr
+    # Directory stamps intentionally have whole-second resolution.
+    time.sleep(1.1)
     (root / 'nested/rain.nc').rename(root / 'nested/renamed.nc')
     (root / 'fresh.txt').touch()
     run('index', '--folder', str(root / 'nested'), '--no-progress')
@@ -108,6 +111,7 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     assert run('search', 'fresh.txt').stdout == b''
     run('index', 'update', '--no-progress')
     assert run('search', 'fresh.txt').stdout
+    time.sleep(1.1)
     (root / 'fresh.txt').unlink()
     assert run('search', '-e', 'fresh.txt').stdout == b''
     assert run('search', 'fresh.txt').stdout

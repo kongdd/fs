@@ -1,6 +1,6 @@
 //! Bounded, ordered full scans. SQLite and all path/output work stay on the
 //! caller's single read snapshot; workers only validate/decode/filter bytes.
-use super::{BLOCK_SIZE, BlockReader, MAX_BLOCK_BYTES, decode_block};
+use super::{BLOCK_SIZE, BlockReader, MAX_BLOCK_BYTES, decode_block, expand_root_record};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, Row};
 use std::{sync::mpsc, thread};
@@ -42,6 +42,7 @@ impl EncodedBlock {
         decoder: &mut zstd::bulk::Decompressor<'_>,
         decoded: &mut Vec<u8>,
         basename: bool,
+        root: &[u8],
         predicates: (&impl Fn(&[u8]) -> bool, &impl Fn(&[u8]) -> bool),
     ) -> Result<FilteredBlock> {
         decode_block(
@@ -52,9 +53,12 @@ impl EncodedBlock {
             self.n,
             self.directory,
         )?;
+        if self.directory == 0 {
+            expand_root_record(root, decoded)?;
+        }
         let (matches, name_matches) = predicates;
         let mut names = Vec::new();
-        for name in decoded[..self.size - 1].split(|&b| b == 0) {
+        for name in decoded[..decoded.len() - 1].split(|&b| b == 0) {
             if name_matches(name) && (!basename || matches(name)) {
                 names.extend_from_slice(name);
                 names.push(0);
@@ -123,6 +127,8 @@ pub(super) fn parallel(
     };
     let mut pending = Some(EncodedBlock::from_row(row));
     let (matches, _) = predicates;
+    let root = reader.paths.format(connection)?.root.clone();
+    let root = root.as_slice();
     thread::scope(|scope| {
         let mut pipes = Vec::new();
         let mut handles = Vec::new();
@@ -139,7 +145,13 @@ pub(super) fn parallel(
                             let mut result = Vec::with_capacity(batch.len());
                             for block in batch {
                                 let filtered = block.and_then(|block| {
-                                    block.filter(&mut decoder, &mut decoded, basename, predicates)
+                                    block.filter(
+                                        &mut decoder,
+                                        &mut decoded,
+                                        basename,
+                                        root,
+                                        predicates,
+                                    )
                                 });
                                 let failed = filtered.is_err();
                                 result.push(filtered);

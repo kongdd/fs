@@ -102,7 +102,7 @@ pub fn build_indexes(
         } else {
             let _lock = lock_database(&idx.database)?;
             let scope = idx.root.join(folder.strip_prefix(root)?);
-            crate::native::update(idx, Some(&scope), progress)?;
+            crate::index_builder::update(idx, Some(&scope), progress)?;
         }
     }
     Ok(())
@@ -172,12 +172,12 @@ fn build_one(idx: &IndexConfig, progress: bool) -> Result<()> {
         format_args!("indexing {} [rust]: {}", idx.name, idx.root.display()),
     );
     if idx.database.exists() {
-        crate::native::update(idx, None, progress)?;
+        crate::index_builder::update(idx, None, progress)?;
     } else {
         let workspace = Workspace::new(&idx.database)?;
         let mut temporary = idx.clone();
         temporary.database = workspace.0.join("index.db");
-        crate::native::update(&temporary, None, progress)?;
+        crate::index_builder::update(&temporary, None, progress)?;
         fs::OpenOptions::new()
             .write(true)
             .open(&temporary.database)?

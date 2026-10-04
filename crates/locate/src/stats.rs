@@ -34,7 +34,7 @@ pub struct StatsOptions {
 
 pub fn stats(cfg: &Config, options: &StatsOptions) -> Result<()> {
     for idx in cfg.select(&options.indexes)? {
-        crate::native::is_native(&idx.database)?;
+        crate::index_search::is_rust_index(&idx.database)?;
     }
     let root = options.path.as_deref().map(absolute_path).transpose()?;
     let mut connection = cache::open(cfg)?;
@@ -189,10 +189,10 @@ fn collect(cfg: &Config, indexes: &[String]) -> Result<Counts> {
         && idx.root.is_absolute()
         && idx.filters.exclude_extensions.is_empty()
         && idx.filters.exclude_files.is_empty()
-        && crate::native::is_native(&idx.database)?
+        && crate::index_search::is_rust_index(&idx.database)?
     {
         let mut counts = Counts::new(false);
-        let root = crate::native::directory_counts(idx, |path, n| {
+        let root = crate::index_search::directory_counts(idx, |path, n| {
             counts.add_children(path, n);
             Ok(())
         })?;
@@ -294,7 +294,7 @@ fn separated(count: i64) -> String {
 mod shared_tests;
 
 #[cfg(all(test, unix))]
-#[path = "../../../tests/unit/locate/native_stats.rs"]
+#[path = "../../../tests/unit/locate/index_stats.rs"]
 mod tests;
 
 #[cfg(all(test, windows))]

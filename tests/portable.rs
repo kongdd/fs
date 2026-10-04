@@ -1,11 +1,11 @@
-use fs_locate::native;
+use fs_locate::index_search;
 use fs_locate::{
     config::{Config, Filters, IndexConfig, Tools},
     platform::path_bytes,
     search::{self, SearchOptions},
     stats,
 };
-use fs_updatedb::native::update;
+use fs_updatedb::index_builder::update;
 use std::{
     fs,
     path::PathBuf,
@@ -87,7 +87,7 @@ fn native_unicode_glob_regex_and_reuse() {
         1
     );
     let idx = &fixture.cfg.index[0];
-    assert!(native::is_native(&idx.database).unwrap());
+    assert!(index_search::is_rust_index(&idx.database).unwrap());
     assert_eq!(update(idx, None, false).unwrap().scanned, 0);
 }
 
@@ -95,6 +95,8 @@ fn native_unicode_glob_regex_and_reuse() {
 fn scoped_updates_limits_and_offline_queries() {
     let fixture = Fixture::new();
     let idx = &fixture.cfg.index[0];
+    // Directory change detection intentionally uses whole seconds.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     fs::rename(
         idx.root.join("nested/rain.nc"),
         idx.root.join("nested/new.nc"),
@@ -125,7 +127,7 @@ fn statistics_match_paths_and_survive_offline_roots() {
     let fixture = Fixture::new();
     let idx = &fixture.cfg.index[0];
     let mut n = 1; // The indexed root itself.
-    native::directory_counts(idx, |_, count| {
+    index_search::directory_counts(idx, |_, count| {
         n += count;
         Ok(())
     })
@@ -171,13 +173,13 @@ fn windows_path_patterns_and_scopes() {
             path_bytes(&idx.root.join("nested/rain.nc")).into_owned(),
         ]
     );
-    let query = native::Query::new(&SearchOptions {
+    let query = index_search::Query::new(&SearchOptions {
         patterns: vec![idx.root.join("nested").into_os_string()],
         ..Default::default()
     })
     .unwrap();
     let mut count = 0;
-    native::visit(idx, &query, |_| {
+    index_search::visit(idx, &query, |_| {
         count += 1;
         Ok(true)
     })

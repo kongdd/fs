@@ -128,35 +128,36 @@ pub(crate) fn visit_paths_until_filtered(
     }
     let native = indexes
         .iter()
-        .map(|idx| crate::native::is_native(&idx.database))
+        .map(|idx| crate::index_search::is_rust_index(&idx.database))
         .collect::<Result<Vec<_>>>()?;
     if native.iter().any(|native| *native) {
         if native.iter().any(|native| !native) {
             bail!("cannot mix Rust and plocate indexes in one query; select indexes with -d");
         }
-        let query = crate::native::Query::new(options)?;
+        let query = crate::index_search::Query::new(options)?;
         let mut skipped = 0;
         let mut written = 0;
         for idx in &indexes {
-            let complete = crate::native::visit_filtered(idx, &query, &name_matches, |path| {
-                if is_excluded(path, &indexes)?
-                    || !matches_selection(path, scope.as_deref(), &options.extensions)?
-                    || !matches_kind(path, options.dirs, options.files)?
-                    || is_ignored_dir(path, &options.ignored_dirs)?
-                {
-                    return Ok(true);
-                }
-                if options.existing && !path_from_bytes(path)?.try_exists()? {
-                    return Ok(true);
-                }
-                if skipped < options.offset {
-                    skipped += 1;
-                    return Ok(true);
-                }
-                let keep_going = visit(path, true)?;
-                written += 1;
-                Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
-            })?;
+            let complete =
+                crate::index_search::visit_filtered(idx, &query, &name_matches, |path| {
+                    if is_excluded(path, &indexes)?
+                        || !matches_selection(path, scope.as_deref(), &options.extensions)?
+                        || !matches_kind(path, options.dirs, options.files)?
+                        || is_ignored_dir(path, &options.ignored_dirs)?
+                    {
+                        return Ok(true);
+                    }
+                    if options.existing && !path_from_bytes(path)?.try_exists()? {
+                        return Ok(true);
+                    }
+                    if skipped < options.offset {
+                        skipped += 1;
+                        return Ok(true);
+                    }
+                    let keep_going = visit(path, true)?;
+                    written += 1;
+                    Ok(keep_going && options.limit.is_none_or(|limit| written < limit))
+                })?;
             if !complete {
                 break;
             }

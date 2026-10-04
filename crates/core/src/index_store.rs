@@ -1,17 +1,18 @@
-//! Shared native index format; schema v2 stays compatible with nasfind v0.3.x.
+//! Rust index storage, block readers, validation, and relative-path resolution.
 use crate::config::IndexConfig;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::{collections::HashMap, fs, io::Read, path::Path, time::Duration};
+use std::{borrow::Cow, collections::HashMap, fs, io::Read, path::Path, time::Duration};
 
 mod scan;
 
 pub const APPLICATION_ID: i64 = 0x4e465231;
-pub const VERSION: i64 = 2;
+pub const VERSION: i64 = 4;
+
 pub const BLOCK_SIZE: usize = 32;
 pub const MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
-pub fn is_native(path: &Path) -> Result<bool> {
+pub fn is_rust_index(path: &Path) -> Result<bool> {
     let mut header = [0; 100];
     let mut file = fs::File::open(path)?;
     let length = file.read(&mut header)?;
@@ -24,7 +25,10 @@ pub fn is_native(path: &Path) -> Result<bool> {
     let application = u32::from_be_bytes(header[68..72].try_into()?);
     let version = u32::from_be_bytes(header[60..64].try_into()?);
     if i64::from(application) != APPLICATION_ID || i64::from(version) != VERSION {
-        bail!("not a supported fs Rust index: {}", path.display());
+        bail!(
+            "unsupported fs Rust index (version={version}): {}; rebuild using a new database path",
+            path.display()
+        );
     }
     Ok(true)
 }
@@ -39,8 +43,73 @@ pub fn validate(connection: &Connection) -> Result<()> {
     let app: i64 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if app != APPLICATION_ID || version != VERSION {
-        bail!("not a supported fs Rust index (application={app}, version={version})");
+        bail!(
+            "unsupported fs Rust index (application={app}, version={version}); rebuild using a new database path"
+        );
     }
+    Ok(())
+}
+
+/// Maps relative directory paths using the single stored root.
+pub struct DirectoryPaths {
+    root: Vec<u8>,
+}
+
+impl DirectoryPaths {
+    pub fn load(connection: &Connection) -> Result<Self> {
+        let root: Vec<u8> =
+            connection.query_row("SELECT value FROM meta WHERE key='root'", [], |r| r.get(0))?;
+        Self::relative(root)
+    }
+
+    pub fn relative(root: Vec<u8>) -> Result<Self> {
+        if root.is_empty() || root.contains(&0) || root.len() >= MAX_BLOCK_BYTES {
+            bail!("corrupt index: invalid root");
+        }
+        Ok(Self { root })
+    }
+
+    pub fn encode<'a>(&self, path: &'a Path) -> Result<Cow<'a, [u8]>> {
+        let relative = path
+            .strip_prefix(crate::platform::path_from_bytes(&self.root)?.as_ref())
+            .context("directory is outside the index root")?;
+        Ok(crate::platform::path_bytes(relative))
+    }
+
+    pub fn resolve(&self, stored: Vec<u8>) -> Result<Vec<u8>> {
+        if stored.contains(&0) {
+            bail!("corrupt index: invalid directory path");
+        }
+        let root = &self.root;
+        if !stored.is_empty()
+            && stored.split(|&b| b == b'/').any(|part| {
+                part.is_empty()
+                    || part == b"."
+                    || part == b".."
+                    || (cfg!(windows) && (part.contains(&b'\\') || part.contains(&b':')))
+            })
+        {
+            bail!("corrupt index: invalid directory path");
+        }
+        let mut path = Vec::with_capacity(root.len() + stored.len() + 1);
+        path.extend_from_slice(root);
+        if !stored.is_empty() {
+            if !path.ends_with(b"/") {
+                path.push(b'/');
+            }
+            path.extend_from_slice(&stored);
+        }
+        Ok(path)
+    }
+}
+
+fn expand_root_record(root: &[u8], decoded: &mut Vec<u8>) -> Result<()> {
+    if decoded.as_slice() != b"\0" {
+        bail!("corrupt index: invalid root block");
+    }
+    decoded.clear();
+    decoded.extend_from_slice(root);
+    decoded.push(0);
     Ok(())
 }
 
@@ -222,37 +291,8 @@ pub fn directory_counts(
     let mut connection = open_read(&idx.database)?;
     validate(&connection)?;
     let transaction = connection.transaction()?;
-    let root: Vec<u8> =
-        transaction.query_row("SELECT value FROM meta WHERE key='root'", [], |row| {
-            row.get(0)
-        })?;
-    if root.is_empty() || root.contains(&0) {
-        bail!("corrupt index: invalid root");
-    }
-    // The root is the one full-path record; all other blocks contain basenames.
-    let roots: i64 =
-        transaction.query_row("SELECT count(*) FROM blocks WHERE directory=0", [], |row| {
-            row.get(0)
-        })?;
-    if roots != 1 {
-        bail!("corrupt index: missing or duplicate root block");
-    }
-    let (data, size, n): (Vec<u8>, i64, i64) = transaction.query_row(
-        "SELECT data,size,n FROM blocks WHERE directory=0",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    if n != 1
-        || size <= 0
-        || size as u64 > MAX_BLOCK_BYTES as u64
-        || size as u64 != root.len() as u64 + 1
-    {
-        bail!("corrupt index: invalid root block");
-    }
-    let decoded = zstd::bulk::decompress(&data, size as usize)?;
-    if decoded.last() != Some(&0) || decoded[..decoded.len().saturating_sub(1)] != root {
-        bail!("corrupt index: root block mismatch");
-    }
+    let format = DirectoryPaths::load(&transaction)?;
+    validate_root_record(&transaction)?;
     let mut statement = transaction.prepare(
         "SELECT d.path,SUM(b.n),MIN(b.n),MAX(b.n),MIN(b.size),MAX(b.size)
          FROM blocks b LEFT JOIN directories d ON d.id=b.directory
@@ -261,7 +301,7 @@ pub fn directory_counts(
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let path: Option<Vec<u8>> = row.get(0)?;
-        let path = path.context("corrupt index: missing block directory")?;
+        let path = format.resolve(path.context("corrupt index: missing block directory")?)?;
         let n: i64 = row.get(1)?;
         let min_n: i64 = row.get(2)?;
         let max_n: i64 = row.get(3)?;
@@ -278,11 +318,34 @@ pub fn directory_counts(
         }
         visitor(&path, n)?;
     }
-    Ok(root)
+    Ok(format.root)
+}
+
+fn validate_root_record(connection: &Connection) -> Result<()> {
+    let roots: i64 =
+        connection.query_row("SELECT count(*) FROM blocks WHERE directory=0", [], |row| {
+            row.get(0)
+        })?;
+    if roots != 1 {
+        bail!("corrupt index: missing or duplicate root block");
+    }
+    let (data, size, n): (Vec<u8>, i64, i64) = connection.query_row(
+        "SELECT data,size,n FROM blocks WHERE directory=0",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if n != 1 || size != 1 {
+        bail!("corrupt index: invalid root block");
+    }
+    if zstd::bulk::decompress(&data, 1)? != b"\0" {
+        bail!("corrupt index: root block mismatch");
+    }
+    Ok(())
 }
 
 #[derive(Default)]
 struct PathReader {
+    format: Option<DirectoryPaths>,
     prefixes: HashMap<i64, Vec<u8>>,
     buffer: Vec<u8>,
 }
@@ -338,7 +401,10 @@ impl BlockReader {
             n,
             directory,
         )?;
-        let names = decoded[..size - 1]
+        if directory == 0 {
+            expand_root_record(&paths.format(connection)?.root, decoded)?;
+        }
+        let names = decoded[..decoded.len() - 1]
             .split(|&b| b == 0)
             .filter(|name| name_matches(name) && (!basename || matches(name)));
         paths.visit(names, connection, directory, basename, matches, visitor)
@@ -366,7 +432,7 @@ fn decode_block(
         bail!("corrupt filename block: size or count mismatch");
     }
     for name in decoded[..size - 1].split(|&b| b == 0) {
-        if name.is_empty()
+        if (name.is_empty() && directory != 0)
             || (directory != 0
                 && (name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))))
         {
@@ -377,6 +443,13 @@ fn decode_block(
 }
 
 impl PathReader {
+    fn format(&mut self, connection: &Connection) -> Result<&DirectoryPaths> {
+        if self.format.is_none() {
+            self.format = Some(DirectoryPaths::load(connection)?);
+        }
+        Ok(self.format.as_ref().unwrap())
+    }
+
     fn visit<'a>(
         &mut self,
         mut names: impl Iterator<Item = &'a [u8]>,
@@ -386,26 +459,24 @@ impl PathReader {
         matches: &impl Fn(&[u8]) -> bool,
         visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
     ) -> Result<bool> {
-        let Self { prefixes, buffer } = self;
         let Some(first) = names.next() else {
             // Basename-only misses need no directory lookup or path allocation.
             // Block validation above still runs even when no names match.
             return Ok(true);
         };
-        if directory != 0
-            && let std::collections::hash_map::Entry::Vacant(entry) = prefixes.entry(directory)
-        {
-            let mut prefix: Vec<u8> = connection
+        if directory != 0 && !self.prefixes.contains_key(&directory) {
+            let stored: Vec<u8> = connection
                 .prepare_cached("SELECT path FROM directories WHERE id=?")?
                 .query_row([directory], |r| r.get(0))?;
-            if prefix.is_empty() || prefix.contains(&0) {
-                bail!("corrupt index: invalid directory path");
-            }
+            let mut prefix = self.format(connection)?.resolve(stored)?;
             if !prefix.ends_with(b"/") {
                 prefix.push(b'/');
             }
-            entry.insert(prefix);
+            self.prefixes.insert(directory, prefix);
         }
+        let Self {
+            prefixes, buffer, ..
+        } = self;
         for name in std::iter::once(first).chain(names) {
             buffer.clear();
             if directory != 0 {

@@ -17,7 +17,9 @@ cargo build --release --bin fs
 
 配置查找顺序：`--config`、`FS_CONFIG`、旧 `NASFIND_CONFIG`、用户配置目录、系统配置目录。每个配置目录先找 `fs/config.toml`，再找旧 `nasfind/config.toml`；Windows 也查找 APPDATA。
 
-`index`、`search` 是兼容别名；`fs soil` 等同于 `fs locate soil`。原生索引 schema v2 不变，可以继续使用同系统的 nasfind v0.3.x 数据库；旧 v1/plocate 数据库不自动转换。
+`index`、`search` 是兼容别名；`fs soil` 等同于 `fs locate soil`。原生索引采用 schema v4：根目录只在 `meta.root` 保存一次，目录表和路径索引保存相对路径，并压缩仅供增量更新使用的 `directory_grams`。开发阶段仅支持当前 v4 原生格式，不兼容或自动迁移旧版原生数据库；旧库须使用新的数据库路径重新建库，程序不会自动覆盖。plocate 后端仍可显式选择，其数据库不自动转换。
+
+目录变更检测使用秒级时间戳；Unix 保存 `dev、inode、mtime秒、ctime秒`（32 字节）。同一目录在一秒内发生的多次变化可能漏检，扫描前后的一致性检查也受此限制。
 
 ## 常用命令
 
@@ -57,6 +59,8 @@ tests/
 ├── integration/# CLI 集成测试
 └── portable.rs # 跨平台库测试
 ```
+
+索引实现按职责命名：`core/src/index_store.rs` 管理格式、读取与校验，`updatedb/src/index_builder.rs` 负责建库及增量更新，`locate/src/index_search.rs` 负责查询入口。
 
 脚本用法见 [scripts/README.md](scripts/README.md)，测试见 [tests/README.md](tests/README.md)，索引设计见 [docs/updatedb/](docs/updatedb/)。
 

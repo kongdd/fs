@@ -1,0 +1,19 @@
+# Mac: fs -c examples/updatedb_mac.toml updatedb -j 8
+# Adjust /Users/kongdd here and in seach.toml for another user.
+engine = "rust"
+
+[filters]
+exclude_dirs = [
+  ".git", "node_modules", "target", "build", "dist",
+  ".venv", "venv", "__pycache__", "site-packages",
+  ".cache", ".cargo", ".rustup", ".bun", ".npm", ".conda", ".julia",
+  "Library", "Applications", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"
+]
+exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
+exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini"]
+
+[[index]]
+name = "mac"
+root = "/Users/kongdd"
+database = "/Users/kongdd/.local/var/fs/mac.db"
+exclude_paths = [".local/var/fs"]

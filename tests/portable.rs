@@ -74,6 +74,33 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn split_configs_use_matching_roots_and_databases() {
+    let load = |name| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name);
+        Config::load(Some(&path)).unwrap().0
+    };
+    let nas = load("updatedb_nas.toml");
+    let mac = load("updatedb_mac.toml");
+    let search = load("seach.toml");
+    assert_eq!(nas.engine.as_deref(), Some("rust"));
+    assert_eq!(mac.engine.as_deref(), Some("rust"));
+    assert!(search.engine.is_none());
+    assert_eq!(search.index.len(), nas.index.len() + mac.index.len());
+    for idx in nas.index.iter().chain(&mac.index) {
+        let selected = search.select(std::slice::from_ref(&idx.name)).unwrap();
+        assert_eq!(selected[0].root, idx.root);
+        let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume1/CMIP6") {
+            PathBuf::from("/mnt/z").join(relative)
+        } else {
+            idx.update_database().to_path_buf()
+        };
+        assert_eq!(selected[0].search_database(), database);
+    }
+}
+
+#[test]
 fn native_unicode_glob_regex_and_reuse() {
     let fixture = Fixture::new();
     assert_eq!(fixture.query("中文🌧.nc").len(), 1);

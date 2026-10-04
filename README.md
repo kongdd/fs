@@ -15,6 +15,22 @@ cargo build --release --bin fs
 
 路径统一用 `/`，包括 Windows 的 `C:/` 和网盘 `//server/share`，这样各系统生成的库可以互相查询。`updatedb` 在每台机器上扫描本机目录，写入该索引的 `database` 或 `update_database`。查询读取 `search_database`（通常是网盘上的库）；不指定索引名时，所有索引联合搜索，可用 `--path` 限制到某个网盘目录。配置示例见 [examples/](examples/)。
 
+### 分离建库与查询配置
+
+- [updatedb_nas.toml](examples/updatedb_nas.toml)：NAS 建库，写入 `/volume1/CMIP6/.fs/`。
+- [updatedb_mac.toml](examples/updatedb_mac.toml)：Mac 本地建库，写入 `/Users/kongdd/.local/var/fs/mac.db`。
+- [seach.toml](examples/seach.toml)：Mac 联合查询 NAS 和本地库，格式从数据库头识别。
+
+两端均使用 Rust；NAS 使用新的数据库路径，不覆盖旧 plocate 库。按实际环境修改用户名和挂载路径；查询配置的 `root` 保持建库时的原始路径。文件名不会自动选择用途，须通过 `-c` 指定。
+
+```sh
+# NAS
+fs -c examples/updatedb_nas.toml updatedb -j 8
+# Mac：先将 NAS /volume1/CMIP6 挂载到 /mnt/z
+fs -c examples/updatedb_mac.toml updatedb -j 8
+fs -c examples/seach.toml locate --mnt soil
+```
+
 配置查找顺序：`--config`、`FS_CONFIG`、旧 `NASFIND_CONFIG`、用户配置目录、系统配置目录。每个配置目录先找 `fs/config.toml`，再找旧 `nasfind/config.toml`；Windows 也查找 APPDATA。
 
 `index`、`search` 是兼容别名；`fs soil` 等同于 `fs locate soil`。原生索引采用 schema v4：根目录只在 `meta.root` 保存一次，目录表和路径索引保存相对路径，并压缩仅供增量更新使用的 `directory_grams`。开发阶段仅支持当前 v4 原生格式，不兼容或自动迁移旧版原生数据库；旧库须使用新的数据库路径重新建库，程序不会自动覆盖。plocate 后端仍可显式选择，其数据库不自动转换。

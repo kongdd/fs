@@ -1,4 +1,7 @@
-# updatedb/plocate are required. Override their paths with [tools] if needed.
+# Rust is the default; no external indexing/search tools are required.
+# Database filenames are derived from each index name.
+outdir = "/var/lib/fs"
+
 [filters]
 # Installed environments, dependency trees, caches and NAS/system metadata.
 # Keep project directories and source files; add custom installation paths per index.
@@ -17,11 +20,10 @@ exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 
 # Edit roots and database paths for your system before indexing.
 # Databases may live inside a root; the file and SQLite sidecars are not indexed.
-# update_database and search_database are optional. Omit them to use database for both.
+# Explicit database, update_database and search_database paths are optional overrides.
 [[index]]
 name = "research"
 root = "/volume1/research"
-database = "/var/lib/nasfind/research.db"
 # update_database = "/var/lib/nasfind/research-build.db"
 # search_database = "/var/lib/nasfind/research.db"
 # Relative paths are resolved against this index root.
@@ -30,5 +32,4 @@ exclude_paths = ["project/cache"]
 [[index]]
 name = "archive"
 root = "/volume2/archive"
-database = "/var/lib/nasfind/archive.db"
 exclude_paths = ["temporary"]

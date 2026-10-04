@@ -73,6 +73,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn split_configs_use_matching_roots_and_databases() {
     let load = |name| {

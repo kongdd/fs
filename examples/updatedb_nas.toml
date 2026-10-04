@@ -2,6 +2,8 @@
 # Use Rust so macOS can query these databases. New paths leave old plocate DBs intact.
 # /volume1/CMIP6 is mounted as /mnt/z on the Mac.
 engine = "rust"
+outdir = "/volume1/CMIP6/.fs"
+
 [filters]
 # Installed environments, dependency trees, caches and NAS/system metadata.
 # Keep project directories and source files; add custom installation paths below.
@@ -35,7 +37,6 @@ exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 [[index]]
 name = "github"
 root = "/volume1/CMIP6/GitHub"
-database = "/volume1/CMIP6/.fs/github.db"
 # Relative paths are resolved against this index root.
 exclude_paths = [
   "kongdd/google-map-downloader/data",
@@ -45,20 +46,16 @@ exclude_paths = [
 [[index]]
 name = "cmip6"
 root = "/volume1/CMIP6"
-database = "/volume1/CMIP6/.fs/cmip6.db"
 exclude_paths = ["GitHub"]
 
 [[index]]
 name = "github_ssd"
 root = "/volume2/GitHub"
-database = "/volume1/CMIP6/.fs/github_ssd.db"
 
 [[index]]
 name = "cug-hydro"
 root = "/volume1/CUG-hydro"
-database = "/volume1/CMIP6/.fs/cug-hydro.db"
 
 [[index]]
 name = "researches"
 root = "/volume1/Researches"
-database = "/volume1/CMIP6/.fs/researches.db"

@@ -117,6 +117,8 @@ struct RawConfig {
     filters: Filters,
     #[serde(default)]
     engine: Option<String>,
+    #[serde(default)]
+    outdir: Option<PathBuf>,
     index: Vec<RawIndex>,
 }
 
@@ -124,7 +126,8 @@ struct RawConfig {
 struct RawIndex {
     name: String,
     root: PathBuf,
-    database: PathBuf,
+    #[serde(default)]
+    database: Option<PathBuf>,
     #[serde(default)]
     update_database: Option<PathBuf>,
     #[serde(default)]
@@ -159,6 +162,12 @@ impl Config {
 
     fn parse(text: &str) -> Result<Self> {
         let raw: RawConfig = toml::from_str(text)?;
+        let outdir = raw.outdir.map(portable_path);
+        if let Some(path) = &outdir
+            && !portable_absolute(path)
+        {
+            bail!("outdir must be absolute: {}", path.display());
+        }
         let global = raw.filters;
         let cfg = Self {
             tools: raw.tools,
@@ -166,35 +175,52 @@ impl Config {
             index: raw
                 .index
                 .into_iter()
-                .map(|idx| IndexConfig {
-                    name: idx.name,
-                    root: portable_path(idx.root),
-                    database: portable_path(idx.database),
-                    update_database: idx.update_database.map(portable_path),
-                    search_database: idx.search_database.map(portable_path),
-                    filters: Filters {
-                        exclude_dirs: idx
-                            .filters
-                            .exclude_dirs
-                            .unwrap_or_else(|| global.exclude_dirs.clone()),
-                        exclude_paths: idx
-                            .filters
-                            .exclude_paths
-                            .unwrap_or_else(|| global.exclude_paths.clone())
-                            .into_iter()
-                            .map(portable_path)
-                            .collect(),
-                        exclude_extensions: idx
-                            .filters
-                            .exclude_extensions
-                            .unwrap_or_else(|| global.exclude_extensions.clone()),
-                        exclude_files: idx
-                            .filters
-                            .exclude_files
-                            .unwrap_or_else(|| global.exclude_files.clone()),
-                    },
+                .map(|idx| {
+                    let database = match idx.database {
+                        Some(path) => portable_path(path),
+                        None => {
+                            let directory = outdir.as_ref().with_context(|| {
+                                format!("index {} needs database or global outdir", idx.name)
+                            })?;
+                            if idx.name.trim().is_empty()
+                                || matches!(idx.name.as_str(), "." | "..")
+                                || idx.name.contains(['/', '\\', ':', '\0'])
+                            {
+                                bail!("invalid database name: {:?}", idx.name);
+                            }
+                            portable_path(directory.join(format!("{}.db", idx.name)))
+                        }
+                    };
+                    Ok(IndexConfig {
+                        name: idx.name,
+                        root: portable_path(idx.root),
+                        database,
+                        update_database: idx.update_database.map(portable_path),
+                        search_database: idx.search_database.map(portable_path),
+                        filters: Filters {
+                            exclude_dirs: idx
+                                .filters
+                                .exclude_dirs
+                                .unwrap_or_else(|| global.exclude_dirs.clone()),
+                            exclude_paths: idx
+                                .filters
+                                .exclude_paths
+                                .unwrap_or_else(|| global.exclude_paths.clone())
+                                .into_iter()
+                                .map(portable_path)
+                                .collect(),
+                            exclude_extensions: idx
+                                .filters
+                                .exclude_extensions
+                                .unwrap_or_else(|| global.exclude_extensions.clone()),
+                            exclude_files: idx
+                                .filters
+                                .exclude_files
+                                .unwrap_or_else(|| global.exclude_files.clone()),
+                        },
+                    })
                 })
-                .collect(),
+                .collect::<Result<_>>()?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -336,6 +362,10 @@ fn normalize_engine(engine: Option<String>) -> Result<Option<String>> {
 pub const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.example.toml");
 #[cfg(windows)]
 pub const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.windows.toml");
+
+#[cfg(test)]
+#[path = "../../../tests/unit/core/config_outdir.rs"]
+mod outdir_tests;
 
 #[cfg(all(test, unix))]
 #[path = "../../../tests/unit/core/config.rs"]

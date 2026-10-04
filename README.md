@@ -21,7 +21,7 @@ cargo build --release --bin fs
 - [updatedb_mac.toml](examples/updatedb_mac.toml)：Mac 本地建库，写入 `/Users/kongdd/.local/var/fs/mac.db`。
 - [seach.toml](examples/seach.toml)：Mac 联合查询 NAS 和本地库，格式从数据库头识别。
 
-两端均使用 Rust；NAS 使用新的数据库路径，不覆盖旧 plocate 库。按实际环境修改用户名和挂载路径；查询配置的 `root` 保持建库时的原始路径。文件名不会自动选择用途，须通过 `-c` 指定。
+建库配置只需设置全局 `outdir`，每个索引按 `name` 生成 `<outdir>/<name>.db`；查询配置逐项填写完整的 `database` 路径。已有显式 `database`、`update_database`、`search_database` 配置仍兼容。两端均使用 Rust；NAS 使用新的数据库路径，不覆盖旧 plocate 库。按实际环境修改用户名和挂载路径；查询配置的 `root` 保持建库时的原始路径。文件名不会自动选择用途，须通过 `-c` 指定。
 
 ```sh
 # NAS

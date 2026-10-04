@@ -66,4 +66,14 @@ with tempfile.TemporaryDirectory(prefix='fs-engine-default-') as temporary:
     expected = run(None, 'locate', '-0', 'file.nc').stdout
     assert run('plocate', 'locate', '-0', 'file.nc').stdout == expected
     assert run('invalid', 'locate', '-0', 'file.nc').stdout == expected
+    # Build from outdir + name, then query through an explicit database path.
+    output = base / 'output'
+    config.write_text('outdir=' + json.dumps(str(output)) +
+                      '\n[[index]]\nname="test"\nroot=' + json.dumps(str(root)) + '\n')
+    run(None, 'updatedb')
+    generated = output / 'test.db'
+    assert generated.read_bytes().startswith(b'SQLite format 3\0')
+    config.write_text('[[index]]\nname="test"\nroot=' + json.dumps(str(root)) +
+                      '\ndatabase=' + json.dumps(str(generated)) + '\n')
+    assert run(None, 'locate', '-0', 'file.nc').stdout == expected
 print('Default engine CLI integration tests passed')

@@ -59,13 +59,13 @@ with tempfile.TemporaryDirectory(prefix='fs-parallel-e2e-') as temporary:
                    ('|' in expression and b'py' in p.rsplit(b'/', 1)[-1])) and
                   (b'd0600' in p if 'd0600' in expression else b'd00' not in p)]
         assert paths(expression) == wanted
-        assert paths('--offset', '1', '-l', '2', expression) == wanted[1:3]
+        assert paths('--offset', '1', '-n', '2', expression) == wanted[1:3]
     assert paths('!py') == [p for p in whole if p not in py]
     assert paths('ext:c') == [p for p in whole if p.endswith(b'.c')]
     assert paths('--regex', 'py|other') == [p for p in whole if any(word in p.rsplit(b'/', 1)[-1] for word in [b'py', b'other'])]
-    assert paths('--offset', '530', '-l', '20', 'py') == py[530:550]
-    assert paths('-l', '513', 'py') == py[:513]
-    assert paths('-l', '1', 'py') == py[:1]
+    assert paths('--offset', '530', '-n', '20', 'py') == py[530:550]
+    assert paths('-n', '513', 'py') == py[:513]
+    assert paths('-n', '1', 'py') == py[:1]
     assert paths('--path', str(root / 'd0600'), 'py') == [p for p in py if p.startswith(os.fsencode(root / 'd0600').replace(b'\\', b'/') + b'/')]
     output = run(binary, 'search', '--json', 'py')
     assert [row['path'] for row in json.loads(output)] == [p.decode() for p in py]

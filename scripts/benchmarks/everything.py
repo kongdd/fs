@@ -62,7 +62,7 @@ def main():
             ('or', ['soil | rain'], ['--regex', 'soil|rain'], lambda path: b'soil' in basename(path) or b'rain' in basename(path), None),
             ('not', ['station !soil'], None, lambda path: b'station' in basename(path) and b'soil' not in basename(path), None),
             ('extension', ['ext:nc;tif'], ['--regex', '[.](nc|tif)$'], lambda path: basename(path).endswith((b'.nc', b'.tif')), None),
-            ('limit50', ['-l', '50', 'soil'], ['-l', '50', 'soil'], lambda path: b'soil' in basename(path), 50),
+            ('limit50', ['-n', '50', 'soil'], ['-l', '50', 'soil'], lambda path: b'soil' in basename(path), 50),
         ]
         for name, everything, raw, predicate, limit in cases:
             oracle = {path for path in expected if predicate(path)}

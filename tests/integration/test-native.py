@@ -93,11 +93,11 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
         encoded(root / 'soil_ERA5.nc'), encoded(root / 'nested/rain.nc'),
     }
     soil = run('soil', '-0').stdout.split(b'\0')[:-1]
-    assert run('soil | soil_ERA5', '-0', '--offset', '1', '-l', '1').stdout == soil[1] + b'\0'
+    assert run('soil | soil_ERA5', '-0', '--offset', '1', '-n', '1').stdout == soil[1] + b'\0'
     assert run('path:nested ext:nc !renamed', '-0').stdout == encoded(root / 'nested/rain.nc') + b'\0'
     assert run('search', '--path', str(root) + '-other', '*').stdout == b''
     all_paths = run('search', '-0', '*').stdout.split(b'\0')[:-1]
-    assert run('search', '-0', '--offset', '1', '-l', '2', '*').stdout.split(b'\0')[:-1] == all_paths[1:3]
+    assert run('search', '-0', '--offset', '1', '-n', '2', '*').stdout.split(b'\0')[:-1] == all_paths[1:3]
     run('search', '-r', '(', ok=False)
     before = (base / 'index.db').read_bytes()
     run('index', 'update', '--engine', 'plocate', ok=False)

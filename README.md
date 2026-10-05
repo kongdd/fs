@@ -42,7 +42,7 @@ fs soil
 fs locate '*.nc'
 fs locate '<soil | rain> ext:nc !backup'
 fs locate --regex '^soil[.]nc$' --basename
-fs locate --files --ext nc --path /data/project -l 20 soil
+fs locate --files --ext nc --path /data/project -n20 soil
 fs locate --offset 20 --json soil
 fs locate --locate -i -b soil      # 传统 locate 匹配语义
 
@@ -69,6 +69,16 @@ export FS_ENGINE=rust      # 仅对当前进程环境生效
 
 `--engine` 可临时覆盖默认设置；切换引擎不会转换已有数据库。
 
+### 记住查询与建库配置
+
+路径保存为绝对路径。之后 `locate`、`stats`、`ignore` 使用 locate 配置，`updatedb` 使用 updatedb 配置。`-c` 与 `FS_CONFIG` 仍优先。
+
+```sh
+fs config set locate search.toml
+fs config set updatedb updatedb.yaml
+fs config list
+```
+
 ### NAS 建库，Mac 查询
 
 建库与查询可以使用不同配置：NAS 扫描文件并保存数据库，Mac 通过挂载目录读取数据库。
@@ -81,6 +91,9 @@ update_nas
 # Mac 本地建库，再联合查询 NAS 和本地索引
 fs -c config/updatedb_mac.toml updatedb -j 8
 fs -c config/seach.toml locate --mnt soil
+# 或先保存配置，以后可省略 -c
+fs config set locate config/seach.toml
+fs config set updatedb config/updatedb_nas.toml
 ```
 
 使用前须修改 [config/](config/) 中的用户名、扫描目录和数据库路径，并挂载 NAS。查询配置的 `root` 保持建库时的原始路径；`--mnt` 将搜索结果转换为本机挂载路径。

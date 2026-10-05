@@ -168,9 +168,9 @@ assert search("ignore") == b""
 assert search("local_visibility") == (root + "/archive/private/local_visibility.txt\n").encode()
 rows = json.loads(search("--json", "soil"))
 assert {r["path"] for r in rows} == {root + "/research/soil_moisture.nc", root + "/archive/soil_archive.txt"}
-assert len(json.loads(search("--json", "-l", "1", "soil"))) == 1
+assert len(json.loads(search("--json", "-n", "1", "soil"))) == 1
 assert run("search", "--json", "--null", "soil").returncode != 0
-assert run("search", "-l", "0", "soil").returncode != 0
+assert run("search", "-n", "0", "soil").returncode != 0
 
 # Folder selection updates additions/deletions in one DB, leaving others untouched.
 archive_before = (base / "archive.db").read_bytes()
@@ -360,7 +360,7 @@ assert selected_paths == expected_paths, (selected_paths, expected_paths)
 assert search('--ext', 'nc', '--ext', 'txt', '--path', str(base / 'research') + '-other', '*') == b''
 assert search('--regex', '--ext', 'NC', 'soil_moisture[.]nc$') == (str(base / 'research/soil_moisture.nc') + '\n').encode()
 all_paths = search('--ext', 'nc,txt', '-0', '*').split(b'\0')[:-1]
-page = search('--ext', 'nc,txt', '--offset', '1', '--limit', '1', '-0', '*').split(b'\0')[:-1]
+page = search('--ext', 'nc,txt', '--offset', '1', '--nlimit', '1', '-0', '*').split(b'\0')[:-1]
 assert page == all_paths[1:2], (page, all_paths)
 assert search('--offset', '999999', '--json', '*') == b'[]\n'
 assert search('--ext', 'nc', '--null', 'soil').split(b'\0')[:-1] == [p for p in search('-0', 'soil').split(b'\0')[:-1] if p.rsplit(b'.', 1)[-1].lower() == b'nc']
@@ -469,7 +469,7 @@ assert run("search", "soil").returncode != 0
 mock.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('backend failure\\n')\nsys.stderr.flush()\nsys.stdout.buffer.write(" + repr((root + '/research/soil.nc').encode() + b'\0') + ")\nsys.stdout.flush()\nsys.exit(1)\n")
 with (base / "config.toml").open("a") as f:
     f.write('exclude_extensions=["tmp"]\n')
-assert run("search", "-l", "1", "soil").returncode != 0
+assert run("search", "-n", "1", "soil").returncode != 0
 
 PYTEST
 echo "End-to-end plocate tests passed"

@@ -48,7 +48,7 @@ pub struct SearchOptions {
     #[arg(short = 'o', long, default_value_t = 0)]
     pub offset: usize,
     /// Stop after this many matches after filtering and offset.
-    #[arg(short = 'l', long)]
+    #[arg(short = 'n', long = "nlimit")]
     pub limit: Option<usize>,
     /// Map NAS output paths to /mnt/{z,x,y,o} (CMIP6, GitHub, Researches, CUG-hydro).
     #[arg(long)]

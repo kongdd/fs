@@ -22,7 +22,7 @@ use search::SearchOptions;
     about = "Everything-style byte-safe NAS search with plocate and Rust"
 )]
 struct Cli {
-    /// Config file. Defaults to FS_CONFIG, ~/.config/fs/config.toml, then the system config.
+    /// Config file. Overrides FS_CONFIG, `fs config set`, and the default config.
     #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
@@ -68,7 +68,7 @@ enum Commands {
         engine: Option<IndexEngine>,
     },
 
-    /// Show or change settings stored in the config file.
+    /// Show or change saved settings.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -135,6 +135,32 @@ enum ConfigAction {
         /// rust, or plocate on Linux. Omit to print the current default.
         engine: Option<IndexEngine>,
     },
+    /// Save the config file used by locate or updatedb. The path is stored absolute.
+    Set {
+        /// locate or updatedb.
+        role: ConfigRole,
+        /// Config file. Relative paths are resolved from the current directory.
+        path: String,
+    },
+    /// Show the saved locate and updatedb config paths.
+    List,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigRole {
+    #[value(alias = "search")]
+    Locate,
+    #[value(alias = "index")]
+    Updatedb,
+}
+
+impl ConfigRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Locate => "locate",
+            Self::Updatedb => "updatedb",
+        }
+    }
 }
 
 fn env_engine() -> Result<Option<IndexEngine>> {
@@ -175,7 +201,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = normalize_implicit_search(env::args_os().collect());
-    let cli = Cli::parse_from(args);
+    let mut cli = Cli::parse_from(args);
+    cli.config = resolve_cli_config(cli.config, config_role(&cli.command))?;
 
     match cli.command {
         Commands::Init { path, force } => init_config(&path, force),
@@ -246,8 +273,57 @@ fn run() -> Result<()> {
     }
 }
 
+fn config_role(command: &Commands) -> Option<ConfigRole> {
+    match command {
+        Commands::Index { .. } => Some(ConfigRole::Updatedb),
+        Commands::Search(_) | Commands::Stats(_) | Commands::Ignore { .. } => {
+            Some(ConfigRole::Locate)
+        }
+        Commands::Config {
+            action: ConfigAction::Engine { .. },
+        } => Some(ConfigRole::Updatedb),
+        _ => None,
+    }
+}
+
+fn pick_config(
+    explicit: Option<PathBuf>,
+    env_config: bool,
+    saved: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if explicit.is_some() || env_config {
+        explicit
+    } else {
+        saved
+    }
+}
+
+fn resolve_cli_config(
+    explicit: Option<PathBuf>,
+    role: Option<ConfigRole>,
+) -> Result<Option<PathBuf>> {
+    let saved = match role {
+        Some(role) if explicit.is_none() && config::env_config_file().is_none() => {
+            saved_role(role)?
+        }
+        _ => None,
+    };
+    Ok(pick_config(
+        explicit,
+        config::env_config_file().is_some(),
+        saved,
+    ))
+}
+
 fn config_command(config: Option<&Path>, action: ConfigAction) -> Result<()> {
-    let ConfigAction::Engine { engine } = action;
+    match action {
+        ConfigAction::Engine { engine } => config_engine(config, engine),
+        ConfigAction::Set { role, path } => config_set(role, &path),
+        ConfigAction::List => config_list(),
+    }
+}
+
+fn config_engine(config: Option<&Path>, engine: Option<IndexEngine>) -> Result<()> {
     let (_, path) = Config::load(config)?;
     if let Some(engine) = engine {
         engine.ensure_supported()?;
@@ -277,11 +353,15 @@ fn config_command(config: Option<&Path>, action: ConfigAction) -> Result<()> {
 }
 
 fn set_config_engine(text: &str, engine: &str) -> Result<String> {
+    set_toml_key(text, "engine", &format!("\"{engine}\""))
+}
+
+fn set_toml_key(text: &str, key: &str, literal: &str) -> Result<String> {
     let values: std::collections::BTreeMap<String, toml::Spanned<toml::Value>> =
         toml::from_str(text)?;
     let mut out = text.to_string();
-    if let Some(value) = values.get("engine") {
-        out.replace_range(value.span(), &format!("\"{engine}\""));
+    if let Some(value) = values.get(key) {
+        out.replace_range(value.span(), literal);
     } else {
         let offset = text
             .split_inclusive('\n')
@@ -291,9 +371,113 @@ fn set_config_engine(text: &str, engine: &str) -> Result<String> {
             })
             .map(str::len)
             .sum();
-        out.insert_str(offset, &format!("engine = \"{engine}\"\n"));
+        out.insert_str(offset, &format!("{key} = {literal}\n"));
     }
     Ok(out)
+}
+
+fn quote_toml(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn absolute_config_path(raw: &str) -> Result<PathBuf> {
+    if raw.is_empty() {
+        bail!("config path cannot be empty");
+    }
+    let path = std::path::absolute(expand_tilde(raw)?).context("failed to resolve config path")?;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
+fn roles_file() -> Option<PathBuf> {
+    platform::home_dir().map(|home| home.join(".config/fs/roles.toml"))
+}
+
+fn roles_path() -> Result<PathBuf> {
+    roles_file().context("home directory is not set")
+}
+
+fn saved_role(role: ConfigRole) -> Result<Option<PathBuf>> {
+    let Some(file) = roles_file() else {
+        return Ok(None);
+    };
+    role_from(&file, role)
+}
+
+fn role_from(file: &Path, role: ConfigRole) -> Result<Option<PathBuf>> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", file.display()));
+        }
+    };
+    let value: toml::Value =
+        toml::from_str(&text).with_context(|| format!("failed to parse {}", file.display()))?;
+    match value.get(role.as_str()) {
+        None => Ok(None),
+        Some(toml::Value::String(path)) => Ok(Some(PathBuf::from(path))),
+        Some(_) => bail!("{} in {} must be a path", role.as_str(), file.display()),
+    }
+}
+
+fn config_set(role: ConfigRole, raw: &str) -> Result<()> {
+    let path = absolute_config_path(raw)?;
+    let text_path = path.to_str().context("config path must be valid Unicode")?;
+    let file = roles_path()?;
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let existing = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", file.display()));
+        }
+    };
+    write_text_atomic(
+        &file,
+        set_toml_key(&existing, role.as_str(), &quote_toml(text_path))?,
+    )?;
+    println!("{}: {text_path}", role.as_str());
+    Ok(())
+}
+
+fn config_list() -> Result<()> {
+    let file = roles_file();
+    for role in [ConfigRole::Locate, ConfigRole::Updatedb] {
+        let value = file
+            .as_deref()
+            .map(|file| role_from(file, role))
+            .transpose()?
+            .flatten()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not set".to_string());
+        println!("{}: {value}", role.as_str());
+    }
+    Ok(())
 }
 
 fn write_text_atomic(path: &Path, text: String) -> Result<()> {

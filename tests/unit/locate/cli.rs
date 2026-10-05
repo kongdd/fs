@@ -46,6 +46,24 @@ fn updatedb_and_locate_are_canonical_commands() {
 }
 
 #[test]
+fn locate_accepts_nlimit() {
+    for command in ["locate", "search"] {
+        for options in [vec!["--nlimit", "20"], vec!["-n", "20"], vec!["-n20"]] {
+            let mut args = vec!["fs", command];
+            args.extend(options);
+            args.push("soil");
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Commands::Search(options) if options.limit == Some(20)));
+        }
+    }
+    let args = ["fs", "-n20", "soil"].map(OsString::from).to_vec();
+    let cli = Cli::try_parse_from(normalize_implicit_search(args)).unwrap();
+    assert!(matches!(cli.command, Commands::Search(options) if options.limit == Some(20)));
+    assert!(Cli::try_parse_from(["fs", "locate", "--limit", "20", "soil"]).is_err());
+    assert!(Cli::try_parse_from(["fs", "locate", "-l20", "soil"]).is_err());
+}
+
+#[test]
 fn index_engine_defaults_to_plocate_and_rust_is_explicit() {
     for args in [
         vec!["fs", "updatedb"],
@@ -68,6 +86,77 @@ fn index_engine_defaults_to_plocate_and_rust_is_explicit() {
             }
         ));
     }
+}
+
+#[test]
+fn config_set_stores_absolute_paths_and_list_reads_them() {
+    let cli = Cli::try_parse_from(["fs", "config", "set", "locate", "search.toml"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Config {
+            action: ConfigAction::Set {
+                role: ConfigRole::Locate,
+                ref path
+            }
+        } if path == "search.toml"
+    ));
+    let cli = Cli::try_parse_from(["fs", "config", "set", "updatedb", "updatedb.yaml"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Config {
+            action: ConfigAction::Set {
+                role: ConfigRole::Updatedb,
+                ref path
+            }
+        } if path == "updatedb.yaml"
+    ));
+    assert!(Cli::try_parse_from(["fs", "config", "set", "search", "a.toml"]).is_ok());
+    let cli = Cli::try_parse_from(["fs", "config", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Config {
+            action: ConfigAction::List
+        }
+    ));
+    assert!(Cli::try_parse_from(["fs", "config", "set", "locate"]).is_err());
+
+    let locate = absolute_config_path("search.toml").unwrap();
+    let updatedb = absolute_config_path("dir/../updatedb.yaml").unwrap();
+    assert!(locate.is_absolute() && updatedb.is_absolute());
+    assert_eq!(locate.file_name().unwrap(), "search.toml");
+    assert_eq!(updatedb.file_name().unwrap(), "updatedb.yaml");
+    assert!(
+        updatedb
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir))
+    );
+    assert_eq!(quote_toml("a\\b\"c"), r#""a\\b\"c""#);
+
+    let saved = Some(PathBuf::from("/saved.toml"));
+    let explicit = Some(PathBuf::from("explicit.toml"));
+    assert_eq!(pick_config(explicit.clone(), true, saved.clone()), explicit);
+    assert_eq!(pick_config(None, true, saved.clone()), None);
+    assert_eq!(pick_config(None, false, saved.clone()), saved);
+    assert_eq!(pick_config(None, false, None), None);
+
+    let dir = std::env::temp_dir().join(format!("fs-roles-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("roles.toml");
+    let text = set_toml_key("# keep\n", "locate", &quote_toml(locate.to_str().unwrap())).unwrap();
+    let text = set_toml_key(&text, "updatedb", &quote_toml(updatedb.to_str().unwrap())).unwrap();
+    assert!(text.starts_with("# keep\n"));
+    assert!(text.contains("locate = ") && text.contains("updatedb = "));
+    fs::write(&file, text).unwrap();
+    assert_eq!(
+        role_from(&file, ConfigRole::Locate).unwrap().unwrap(),
+        locate
+    );
+    assert_eq!(
+        role_from(&file, ConfigRole::Updatedb).unwrap().unwrap(),
+        updatedb
+    );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

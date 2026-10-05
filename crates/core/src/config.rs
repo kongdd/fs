@@ -320,15 +320,22 @@ impl Config {
     }
 }
 
-/// `C:` is drive-relative in Windows path APIs. Treat a bare drive letter as the volume root.
-pub fn default_config_path() -> Option<PathBuf> {
-    // Keep existing nasfind configurations usable after the rename.
+pub fn env_config_file() -> Option<PathBuf> {
     for variable in ["FS_CONFIG", "NASFIND_CONFIG"] {
         if let Some(path) = env::var_os(variable).map(PathBuf::from)
             && path.is_file()
         {
             return Some(path);
         }
+    }
+    None
+}
+
+/// `C:` is drive-relative in Windows path APIs. Treat a bare drive letter as the volume root.
+pub fn default_config_path() -> Option<PathBuf> {
+    // Keep existing nasfind configurations usable after the rename.
+    if let Some(path) = env_config_file() {
+        return Some(path);
     }
     let mut directories = Vec::new();
     if let Some(home) = crate::platform::home_dir() {

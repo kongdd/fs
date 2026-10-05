@@ -36,8 +36,8 @@ with tempfile.TemporaryDirectory(prefix="fs-ignore-") as temp:
     assert run("ignore", "list").splitlines() == [ignored.name, "node_modules"]
     for mode in [[], ["--locate"], ["--regex"]]:
         assert search(*mode, "soil") == paths[3:]
-        assert search(*mode, "--offset", "1", "-l", "1", "soil") == paths[4:]
-        assert search(*mode, "-l", "1", "soil") == paths[3:4]
+        assert search(*mode, "--offset", "1", "-n", "1", "soil") == paths[4:]
+        assert search(*mode, "-n", "1", "soil") == paths[3:4]
     assert search("<soil | rain> ext:nc") == paths[3:]
     assert config.read_text() == original
     run("ignore", "rm", ignored.name, "node_modules", ignored.name, "not-present")
@@ -52,8 +52,8 @@ with tempfile.TemporaryDirectory(prefix="fs-ignore-") as temp:
     for mode in [[], ["--locate"], ["--regex"]]:
         assert search(*mode, "--dirs", "soil") == directories
         assert search(*mode, "--files", "soil") == files
-        assert search(*mode, "--dirs", "--offset", "1", "-l", "1", "soil") == directories[1:2]
-        assert search(*mode, "--files", "-l", "1", "soil") == files[:1]
+        assert search(*mode, "--dirs", "--offset", "1", "-n", "1", "soil") == directories[1:2]
+        assert search(*mode, "--files", "-n", "1", "soil") == files[:1]
     assert search("--files", "<soil | rain>") == files
     # Mount mapping happens only at output time, after matching and filtering.
     mount_paths = ["/volume1/CMIP6/soil.nc", "/volume1/CMIP6-other/soil.nc",

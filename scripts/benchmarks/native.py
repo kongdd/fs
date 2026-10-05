@@ -128,7 +128,7 @@ def main():
             warmups = {engine: [] for engine in engines}
 
             def query(engine):
-                extra = ['-l', '50'] if label == 'limited' else []
+                extra = ['-n', '50'] if label == 'limited' else []
                 sample, data = measure(commands[engine] + ['search', '--locate', '-b', '-0'] + extra + patterns)
                 result = data.split(b'\0')[:-1]
                 found = set(result)

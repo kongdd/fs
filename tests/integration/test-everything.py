@@ -60,11 +60,11 @@ for engine in engines:
         check('ext:py !script', ['.py'])
         check('ext:' + ';'.join(['py'] * 65), ['script.PY', '.py'])
         py = paths('ext:py')
-        assert paths('--offset', '1', '-l', '1', 'ext:py') == py[1:2]
+        assert paths('--offset', '1', '-n', '1', 'ext:py') == py[1:2]
         # Preserve candidate-order pagination for each extension expression.
         for expression in ['ext:nc;py;x', 'ext:x;py;nc', 'ext:py;nc;x;py']:
             whole_extensions = paths(expression)
-            assert paths('--offset', '1', '-l', '3', expression) == whole_extensions[1:4]
+            assert paths('--offset', '1', '-n', '3', expression) == whole_extensions[1:4]
         nc = {encoded(root / name) for name in names if name.endswith('.nc')} | {invalid}
         assert set(paths('ext:nc')) == nc
         assert set(paths('*.nc')) == nc
@@ -75,7 +75,7 @@ for engine in engines:
         check('**soil**', soil)
         check('soil*', ['soil.nc', 'soil_rain.nc'], '--case-sensitive')
         glob_nc = paths('*.nc')
-        assert paths('--offset', '1', '-l', '2', '*.nc') == glob_nc[1:3]
+        assert paths('--offset', '1', '-n', '2', '*.nc') == glob_nc[1:3]
         check('"my report"', ['my report.nc'])
         check('"a ! b"', ['a ! b.txt'])
         check('path:rain_folder ext:nc', ['rain_folder/other.nc'])
@@ -86,11 +86,11 @@ for engine in engines:
         assert paths('bad') == [invalid]
         assert run('search', '--json', 'nothing_matches').stdout == b'[]\n'
         whole = paths('soil | rain')
-        assert paths('--offset', '1', '-l', '2', 'soil | rain') == whole[1:3]
+        assert paths('--offset', '1', '-n', '2', 'soil | rain') == whole[1:3]
         assert paths('--ext', 'nc', '--path', str(root / 'rain_folder'), '*') == [encoded(root / 'rain_folder/other.nc')]
         for expression in ['soil |', '<>', '<soil', 'soil >', '!', 'ext:', 'folder:']:
             run('search', expression, ok=False)
-        run('search', '-l', '0', '*', ok=False)
+        run('search', '-n', '0', '*', ok=False)
         # Retired/corrupt SQLite indexes must not be queried or overwritten.
         retired = base / 'retired.db'
         payload = b'SQLite format 3\0' + b'old index must remain intact'

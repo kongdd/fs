@@ -216,7 +216,7 @@ def main():
                        for engine in engines}
 
             def query(engine):
-                extra = ['-l', str(limit)] if limit is not None else []
+                extra = ['-n', str(limit)] if limit is not None else []
                 if label == 'regex_scan':
                     extra.append('--regex')
                 sample, data = bench.measure(commands[engine] + ['search', '-0'] + extra + [expression])

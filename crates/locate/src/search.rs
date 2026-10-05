@@ -27,7 +27,7 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
     let mut output = BufWriter::new(io::stdout().lock());
     let mut written = 0;
     if options.limit == Some(0) {
-        bail!("--limit must be greater than zero");
+        bail!("--nlimit must be greater than zero");
     }
     if options.json && options.null {
         bail!("--json and --null cannot be used together");
@@ -102,7 +102,7 @@ pub(crate) fn visit_paths_until_filtered(
         bail!("at least one search pattern is required");
     }
     if options.limit == Some(0) {
-        bail!("--limit must be greater than zero");
+        bail!("--nlimit must be greater than zero");
     }
     if options.json && options.null {
         bail!("--json and --null cannot be used together");

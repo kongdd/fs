@@ -98,7 +98,7 @@ def main():
             for index in args.index:
                 search += ["-d", index]
             if args.limit:
-                search += ["-l", str(args.limit)]
+                search += ["-n", str(args.limit)]
             search += ["--", query]
             samples = [measure(search, args.timeout, True) for _ in range(args.runs)]
             repeated = [sample["seconds"] for sample in samples[1:]]

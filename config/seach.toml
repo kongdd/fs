@@ -8,27 +8,27 @@
 [[index]]
 name = "github"
 root = "/volume1/CMIP6/GitHub"
-database = "/mnt/z/.fs/github.db"
+database = "/mnt/x/config/fs/github.db"
 
 [[index]]
 name = "cmip6"
 root = "/volume1/CMIP6"
-database = "/mnt/z/.fs/cmip6.db"
+database = "/mnt/x/config/fs/cmip6.db"
 
 [[index]]
 name = "github_ssd"
 root = "/volume2/GitHub"
-database = "/mnt/z/.fs/github_ssd.db"
+database = "/mnt/x/config/fs/github_ssd.db"
 
 [[index]]
 name = "cug-hydro"
 root = "/volume1/CUG-hydro"
-database = "/mnt/z/.fs/cug-hydro.db"
+database = "/mnt/x/config/fs/cug-hydro.db"
 
 [[index]]
 name = "researches"
 root = "/volume1/Researches"
-database = "/mnt/z/.fs/researches.db"
+database = "/mnt/x/config/fs/researches.db"
 
 [[index]]
 name = "mac"

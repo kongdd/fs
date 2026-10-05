@@ -113,7 +113,7 @@ pub fn portable_prefix(path: &[u8], prefix: &[u8]) -> bool {
     if path == prefix {
         return true;
     }
-    let prefix = prefix.strip_suffix(b"/").unwrap_or(prefix.as_slice());
+    let prefix = prefix.strip_suffix(b"/").unwrap_or(prefix.as_ref());
     if prefix == b"/" {
         return path.starts_with(b"/");
     }
@@ -121,8 +121,14 @@ pub fn portable_prefix(path: &[u8], prefix: &[u8]) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(b"/"))
 }
 
-fn slash_key(bytes: &[u8]) -> Vec<u8> {
+fn slash_key(bytes: &[u8]) -> Cow<'_, [u8]> {
     let windows_style = is_drive_or_unc(bytes);
+    let uppercase_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_uppercase();
+    if !uppercase_drive
+        && (!windows_style || (!bytes.contains(&b'\\') && !bytes.starts_with(b"//?/")))
+    {
+        return Cow::Borrowed(trim_slashes(bytes));
+    }
     let mut bytes = bytes
         .iter()
         .map(|&byte| {
@@ -146,12 +152,16 @@ fn slash_key(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() >= 2 && bytes[1] == b':' {
         bytes[0] = bytes[0].to_ascii_lowercase();
     }
+    bytes.truncate(trim_slashes(&bytes).len());
+    Cow::Owned(bytes)
+}
+
+fn trim_slashes(mut bytes: &[u8]) -> &[u8] {
     while bytes.len() > 1 && bytes.last() == Some(&b'/') {
-        let drive_root = bytes.len() == 3 && bytes[1] == b':';
-        if drive_root {
+        if bytes.len() == 3 && bytes[1] == b':' {
             break;
         }
-        bytes.pop();
+        bytes = &bytes[..bytes.len() - 1];
     }
     bytes
 }

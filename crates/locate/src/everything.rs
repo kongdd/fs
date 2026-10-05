@@ -6,6 +6,7 @@ use crate::{
     search::{SearchOptions, visit_paths_until_filtered},
 };
 use anyhow::{Result, bail};
+use fs_core::index_store::grams;
 use std::{collections::HashSet, ffi::OsString};
 
 #[derive(Debug, PartialEq)]
@@ -129,6 +130,26 @@ impl Expr {
             Self::And(a, b) => a.may_match_basename(name) && b.may_match_basename(name),
             Self::Or(a, b) => a.may_match_basename(name) || b.may_match_basename(name),
             Self::Not(a) => !a.basename_only() || !a.matches(name),
+        }
+    }
+
+    // Only positive AND terms are mandatory. Leave OR/NOT planning unchanged.
+    fn required_grams(&self) -> Vec<u32> {
+        match self {
+            Self::Term(term) => term
+                .anchor
+                .as_ref()
+                .map_or_else(Vec::new, |(pattern, _)| grams(pattern.as_encoded_bytes())),
+            Self::Extension(ext) if ext.len() == 1 => {
+                let literal = [b".".as_slice(), &ext[0]].concat();
+                anchor(&literal).map_or_else(Vec::new, |run| grams(&run))
+            }
+            Self::And(a, b) => {
+                let mut grams = a.required_grams();
+                grams.extend(b.required_grams());
+                grams
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -341,6 +362,11 @@ pub fn visit(
 ) -> Result<()> {
     let expr = parse(options)?;
     let branches = expr.branches()?;
+    let required_grams = if matches!(expr, Expr::And(..)) {
+        expr.required_grams()
+    } else {
+        Vec::new()
+    };
     let mut anchors = Vec::new();
     for branch in branches {
         let Some(best) = branch else {
@@ -369,6 +395,7 @@ pub fn visit(
         visit_paths_until_filtered(
             cfg,
             &candidate,
+            &required_grams,
             |name| expr.may_match_basename(name),
             |path, native_filtered| {
                 if (!(native_filtered && basename_only) && !expr.matches(path))

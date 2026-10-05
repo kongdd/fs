@@ -171,6 +171,44 @@ fn ignored_paths_use_component_boundaries_and_cover_descendants() {
 }
 
 #[test]
+fn compiled_exclusions_resolve_paths_once_and_preserve_ownership() {
+    let mut outer = idx("outer", "/data", &["tmp"]);
+    outer.filters.exclude_paths = vec!["cache".into(), "/elsewhere".into()];
+    outer.filters.exclude_files = vec!["SECRET".into()];
+    let inner = idx("inner", "/data/cache/keep", &[]);
+    let filters = Exclusions::new(&[&outer, &inner]);
+    assert_eq!(
+        filters.indexes[1].1,
+        vec![PathBuf::from("/data/cache"), PathBuf::from("/elsewhere")]
+    );
+    for path in [
+        b"/data/cache/x".as_slice(),
+        b"/data/file.TMP",
+        b"/data/secret",
+    ] {
+        assert!(filters.matches(path).unwrap());
+    }
+    for path in [
+        b"/data/cache-other/x".as_slice(),
+        b"/data/cache/keep/file.tmp",
+        b"/outside/secret",
+        b"/data/bad_\xff.nc",
+    ] {
+        assert!(!filters.matches(path).unwrap());
+    }
+    assert!(Exclusions::new(&[&inner]).indexes.is_empty());
+}
+
+#[test]
+fn empty_filters_take_the_fast_path() {
+    let path = b"/data/bad_\xff.nc";
+    assert!(matches_selection(path, None, &[]).unwrap());
+    assert!(matches_kind(path, false, false).unwrap());
+    assert!(!is_ignored_dir(path, &[]).unwrap());
+    assert!(!Exclusions::new(&[]).matches(path).unwrap());
+}
+
+#[test]
 fn nested_root_uses_longest_match() {
     let outer = idx("outer", "/data", &["tmp"]);
     let inner = idx("inner", "/data/keep", &[]);

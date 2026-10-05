@@ -1,6 +1,6 @@
 //! Bounded read-ahead for fresh builds. Only the caller touches SQLite.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     io::ErrorKind,
@@ -567,7 +567,10 @@ fn scan_tree_parallel(
 
 /// Parallel directory stats for incremental updates. Filesystem only.
 pub(super) struct StatPool {
-    job_tx: Option<mpsc::Sender<PathBuf>>,
+    root: PathBuf,
+    capacity: usize,
+    submitted: HashSet<PathBuf>,
+    job_tx: Option<SyncSender<PathBuf>>,
     res_rx: Option<mpsc::Receiver<(PathBuf, std::io::Result<Vec<u8>>)>>,
     ready: HashMap<PathBuf, std::io::Result<Vec<u8>>>,
     workers: Vec<JoinHandle<()>>,
@@ -576,8 +579,9 @@ pub(super) struct StatPool {
 impl StatPool {
     pub fn new(root: &Path, jobs: usize) -> Self {
         let jobs = jobs.clamp(1, 256);
-        let (job_tx, job_rx) = mpsc::channel::<PathBuf>();
-        let (res_tx, res_rx) = mpsc::channel::<(PathBuf, std::io::Result<Vec<u8>>)>();
+        let capacity = jobs * 2;
+        let (job_tx, job_rx) = mpsc::sync_channel::<PathBuf>(capacity);
+        let (res_tx, res_rx) = mpsc::sync_channel::<(PathBuf, std::io::Result<Vec<u8>>)>(capacity);
         let job_rx = Arc::new(Mutex::new(job_rx));
         let mut workers = Vec::with_capacity(jobs);
         for index in 0..jobs {
@@ -605,6 +609,9 @@ impl StatPool {
         }
         drop(res_tx);
         Self {
+            root: root.to_path_buf(),
+            capacity,
+            submitted: HashSet::new(),
             job_tx: Some(job_tx),
             res_rx: Some(res_rx),
             ready: HashMap::new(),
@@ -612,15 +619,31 @@ impl StatPool {
         }
     }
 
-    pub fn submit(&self, path: PathBuf) {
-        if let Some(tx) = &self.job_tx {
-            let _ = tx.send(path);
+    pub fn submit(&mut self, path: PathBuf) {
+        // Bound queued jobs, results and the reorder cache together. Never
+        // block the caller here: it is also the only result consumer.
+        if self.submitted.len() < self.capacity
+            && !self.submitted.contains(&path)
+            && let Some(tx) = &self.job_tx
+            && tx.try_send(path.clone()).is_ok()
+        {
+            self.submitted.insert(path);
+        }
+    }
+
+    pub fn prefetch(&mut self, paths: &[PathBuf]) {
+        for path in paths.iter().rev().take(self.capacity) {
+            self.submit(path.clone());
         }
     }
 
     pub fn take(&mut self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if !self.submitted.contains(path) {
+            return stamp_io(path, &self.root);
+        }
         loop {
             if let Some(result) = self.ready.remove(path) {
+                self.submitted.remove(path);
                 return result;
             }
             let (done, result) = self

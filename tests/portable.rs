@@ -78,7 +78,7 @@ impl Drop for Fixture {
 fn split_configs_use_matching_roots_and_databases() {
     let load = |name| {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config")
+            .join("config")
             .join(name);
         Config::load(Some(&path)).unwrap().0
     };

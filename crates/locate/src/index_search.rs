@@ -47,6 +47,15 @@ impl Query {
         })
     }
 
+    pub(crate) fn add_grams(&mut self, grams: &[u32]) {
+        if grams.is_empty() {
+            return;
+        }
+        self.grams.extend_from_slice(grams);
+        self.grams.sort_unstable();
+        self.grams.dedup();
+    }
+
     pub fn matches(&self, path: &[u8]) -> bool {
         self.matcher.matches(path)
     }

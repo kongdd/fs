@@ -469,5 +469,5 @@ fn expand_tilde(path: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/locate/cli.rs"]
+#[path = "../tests/unit/locate/cli.rs"]
 mod tests;

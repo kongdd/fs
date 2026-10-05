@@ -2,7 +2,7 @@
 # Use Rust so macOS can query these databases. New paths leave old plocate DBs intact.
 # /volume1/CMIP6 is mounted as /mnt/z on the Mac.
 engine = "rust"
-outdir = "/volume1/CMIP6/.fs"
+outdir = "/volume2/config/fs"
 
 [filters]
 # Installed environments, dependency trees, caches and NAS/system metadata.

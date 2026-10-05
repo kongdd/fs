@@ -1201,6 +1201,83 @@ fn incremental_updates_do_not_follow_replaced_child_symlinks() {
 }
 
 #[test]
+fn scoped_directory_ranges_match_component_prefixes_with_raw_bytes() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX directory_paths ON directories(path)",
+            [],
+        )
+        .unwrap();
+    let paths: &[&[u8]] = &[
+        b"",
+        b"a",
+        b"a/child",
+        b"a/bad_\xff",
+        b"a-other",
+        b"ab/child",
+        b"a0",
+        b"\xff",
+        b"\xff/child",
+        b"\xff-other",
+    ];
+    for path in paths {
+        connection
+            .execute(
+                "INSERT INTO directories(path,stamp) VALUES (?,?)",
+                params![path, b"".as_slice()],
+            )
+            .unwrap();
+    }
+    for scope in [
+        b"".as_slice(),
+        b"a",
+        b"a/",
+        b"a///",
+        b"a/child",
+        b"a/bad_\xff",
+        b"\xff",
+        b"missing",
+    ] {
+        let mut actual = scoped_directories(&connection, scope).unwrap();
+        actual.sort_unstable_by_key(|(id, _)| *id);
+        let expected: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| {
+                path_from_bytes(path)
+                    .unwrap()
+                    .starts_with(path_from_bytes(scope).unwrap().as_ref())
+            })
+            .map(|(n, path)| ((n + 1) as i64, path.to_vec()))
+            .collect();
+        assert_eq!(actual, expected, "scope: {scope:?}");
+    }
+}
+
+#[test]
+fn bounded_parallel_stats_keep_wide_tree_updates_complete() {
+    let fixture = Fixture::new();
+    for n in 0..32 {
+        let directory = fixture.idx.root.join(format!("d{n:02}/child"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("old.nc"), b"").unwrap();
+    }
+    update(&fixture.idx, None, false).unwrap();
+    let report = update_with_jobs(&fixture.idx, None, false, 4).unwrap();
+    assert_eq!(report.reused, 65);
+    assert_eq!(report.scanned, 0);
+    next_stamp_second();
+    fs::remove_file(fixture.idx.root.join("d00/child/old.nc")).unwrap();
+    fs::write(fixture.idx.root.join("d00/child/new.nc"), b"").unwrap();
+    fs::remove_dir_all(fixture.idx.root.join("d01")).unwrap();
+    update_with_jobs(&fixture.idx, None, false, 4).unwrap();
+    assert_eq!(fixture.query(&["old.nc"], true, false, false).len(), 30);
+    assert_eq!(fixture.query(&["new.nc"], true, false, false).len(), 1);
+}
+
+#[test]
 fn parallel_scan_visits_the_same_directories() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.idx.root.join("a/child")).unwrap();

@@ -7,14 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Cross-platform filesystem locator"
 
-[[bin]]
-name = "fs"
-path = "src/main.rs"
-
-[[test]]
-name = "portable"
-path = "../../tests/portable.rs"
-
 [dependencies]
 fs-core = { path = "../core" }
 fs-updatedb = { path = "../updatedb" }

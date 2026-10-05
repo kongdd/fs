@@ -78,6 +78,33 @@ fn portable_prefix_preserves_unix_backslashes() {
 }
 
 #[test]
+fn portable_keys_borrow_already_normalized_paths() {
+    for path in [
+        b"/data/item/".as_slice(),
+        b"c:/data",
+        b"//nas/share",
+        br"/data/a\b",
+    ] {
+        assert!(matches!(slash_key(path), Cow::Borrowed(_)));
+    }
+    for path in [b"C:/data".as_slice(), br"c:\data", b"//?/UNC/nas/share"] {
+        assert!(matches!(slash_key(path), Cow::Owned(_)));
+    }
+    for (path, expected) in [
+        (b"/".as_slice(), b"/".as_slice()),
+        (b"c:////", b"c:/"),
+        (b"/data///", b"/data"),
+        (b"//?/UNC/nas/share/", b"//nas/share"),
+        (b"//?/C:/data/", b"c:/data"),
+        (b"C:relative", b"c:relative"),
+    ] {
+        assert_eq!(slash_key(path).as_ref(), expected);
+    }
+    assert!(!portable_prefix(b"/data", b""));
+    assert!(portable_prefix(b"c:/data", b"C:/"));
+}
+
+#[test]
 fn native_strings_roundtrip() {
     let text = OsString::from("中文🌧.nc");
     assert_eq!(os_string(text.as_encoded_bytes().to_vec()).unwrap(), text);

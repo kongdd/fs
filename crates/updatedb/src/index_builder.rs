@@ -767,6 +767,28 @@ fn retain_indexed(
     Ok(())
 }
 
+fn scoped_directories(connection: &Connection, mut scope: &[u8]) -> Result<Vec<(i64, Vec<u8>)>> {
+    while let Some(parent) = scope.strip_suffix(b"/") {
+        scope = parent;
+    }
+    let row = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?));
+    if scope.is_empty() {
+        return Ok(connection
+            .prepare("SELECT id,path FROM directories")?
+            .query_map([], row)?
+            .collect::<rusqlite::Result<_>>()?);
+    }
+    let mut lower = scope.to_vec();
+    lower.push(b'/');
+    let mut upper = lower.clone();
+    // All descendants lie in [scope + "/", scope + "0").
+    *upper.last_mut().unwrap() = b'0';
+    Ok(connection
+        .prepare("SELECT id,path FROM directories WHERE path=?1 OR (path>=?2 AND path<?3)")?
+        .query_map(params![scope, lower, upper], row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// Directory mtime permits reusing its immediate entries, NOT skipping its
 /// entire subtree. Every known child directory is still stat'ed independently.
 pub fn update(idx: &IndexConfig, scope: Option<&Path>, progress: bool) -> Result<UpdateReport> {
@@ -859,9 +881,6 @@ pub fn update_with_exclusions(
     let mut pending = vec![scan_root.to_path_buf()];
     let mut stat_pool =
         (existing && jobs > 1).then(|| scan::StatPool::new(&idx.root, jobs as usize));
-    if let Some(pool) = &stat_pool {
-        pool.submit(scan_root.to_path_buf());
-    }
     let mut visited = HashSet::new();
     let mut report = UpdateReport::default();
     if progress {
@@ -912,6 +931,9 @@ pub fn update_with_exclusions(
             };
             (directory.path, directory.before, Some(directory.entries))
         } else {
+            if let Some(pool) = &mut stat_pool {
+                pool.prefetch(&pending);
+            }
             let Some(directory) = pending.pop() else {
                 break;
             };
@@ -986,11 +1008,6 @@ pub fn update_with_exclusions(
                 .rev()
                 .map(|p| os_string(p).map(|name| directory.join(name)))
                 .collect::<Result<Vec<_>>>()?;
-            if let Some(pool) = &stat_pool {
-                for path in &children {
-                    pool.submit(path.clone());
-                }
-            }
             pending.extend(children);
             report.reused += 1;
             report.scan_elapsed += scan_start.elapsed();
@@ -1077,9 +1094,6 @@ pub fn update_with_exclusions(
                 }
                 if is_dir && existing {
                     let child = directory.join(&name);
-                    if let Some(pool) = &stat_pool {
-                        pool.submit(child.clone());
-                    }
                     pending.push(child);
                 }
                 let name = name.as_encoded_bytes();
@@ -1190,16 +1204,13 @@ pub fn update_with_exclusions(
              CREATE INDEX directory_blocks ON blocks(directory);",
         )?;
     }
-    // Remove vanished subtrees only when updating an existing database.
+    // Query only the updated subtree; BLOB ranges preserve raw filename bytes.
+    let stored_scope = paths.encode(scan_root)?;
     let old_directories = if existing {
-        transaction
-            .prepare("SELECT id,path FROM directories")?
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        scoped_directories(&transaction, &stored_scope)?
     } else {
         Vec::new()
     };
-    let stored_scope = paths.encode(scan_root)?;
     let stored_scope = path_from_bytes(&stored_scope)?;
     for (id, path) in old_directories {
         let path = path_from_bytes(&path)?;

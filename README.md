@@ -4,6 +4,8 @@
 
 ## 使用
 
+在仓库根目录安装：`cargo install --path . --locked`。
+
 ```sh
 cargo build --release --bin fs
 ./target/release/fs init
@@ -75,10 +77,11 @@ fs updatedb --engine rust  # 只影响这一次命令
 ## 布局
 
 ```text
+src/main.rs     # fs CLI 入口
 crates/
 ├── core/       # 配置、路径编码、匹配和共享索引格式
 ├── updatedb/   # 扫描、建库、增量更新；可选 plocate 后端
-└── locate/     # 检索、过滤、统计及 fs CLI
+└── locate/     # 检索、过滤、统计
 scripts/
 ├── benchmarks/ # 基准测试及共用测量工具
 ├── release_package.py # 发布包生成

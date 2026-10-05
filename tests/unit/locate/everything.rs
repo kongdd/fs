@@ -106,6 +106,54 @@ fn extension_candidates_are_sound() {
 }
 
 #[test]
+fn required_grams_merge_and_without_crossing_or_or_not() {
+    use std::collections::BTreeSet;
+    let required = |text| {
+        expr(text)
+            .required_grams()
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+    let soil: BTreeSet<_> = grams(b"soil").into_iter().collect();
+    let mut both = soil.clone();
+    both.extend(grams(b"rain"));
+    assert_eq!(required("soil rain"), both);
+    assert_eq!(required("soil !rain"), soil);
+    assert!(required("soil | soil_rain").is_empty());
+    assert!(expr("soil | rain").required_grams().is_empty());
+    assert!(expr("soil | !rain").required_grams().is_empty());
+    assert!(expr("!<soil rain>").required_grams().is_empty());
+    assert_eq!(expr("ext:py").required_grams(), grams(b".py"));
+    assert!(expr("ext:py;x;[ab]").required_grams().is_empty());
+
+    for expression in [
+        "soil rain",
+        "path:soil ext:nc",
+        "<soil | rain> ext:nc",
+        "soil | soil_rain",
+        "ext:py;py",
+        "ext:[ab]",
+        "!<path:soil ext:py>",
+    ] {
+        let q = expr(expression);
+        let required: BTreeSet<_> = q.required_grams().into_iter().collect();
+        for path in [
+            b"/soil/rain.nc".as_slice(),
+            b"/data/soil_rain.nc",
+            b"/data/SOIL.txt",
+            b"/data/bad_\xff.py",
+            b"/data/literal.[ab]",
+            b"/data/.py",
+        ] {
+            if q.matches(path) {
+                let actual: BTreeSet<_> = grams(path).into_iter().collect();
+                assert!(required.is_subset(&actual), "{expression}: {path:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn anchors_are_sound_and_bad_syntax_rejected() {
     for (text, anchor, basename) in [
         ("soil md", "soil", true),

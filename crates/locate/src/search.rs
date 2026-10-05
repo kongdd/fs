@@ -85,7 +85,7 @@ pub(crate) fn visit_paths_until(
     options: &SearchOptions,
     mut visit: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
-    visit_paths_until_filtered(cfg, options, |_| true, |path, _| visit(path))
+    visit_paths_until_filtered(cfg, options, &[], |_| true, |path, _| visit(path))
 }
 
 // The basename predicate is conservative and only pushed into Rust scans.
@@ -94,6 +94,7 @@ pub(crate) fn visit_paths_until(
 pub(crate) fn visit_paths_until_filtered(
     cfg: &Config,
     options: &SearchOptions,
+    required_grams: &[u32],
     name_matches: impl Fn(&[u8]) -> bool + Sync,
     mut visit: impl FnMut(&[u8], bool) -> Result<bool>,
 ) -> Result<()> {
@@ -134,13 +135,15 @@ pub(crate) fn visit_paths_until_filtered(
         if native.iter().any(|native| !native) {
             bail!("cannot mix Rust and plocate indexes in one query; select indexes with -d");
         }
-        let query = crate::index_search::Query::new(options)?;
+        let mut query = crate::index_search::Query::new(options)?;
+        query.add_grams(required_grams);
+        let exclusions = Exclusions::new(&indexes);
         let mut skipped = 0;
         let mut written = 0;
         for idx in &indexes {
             let complete =
                 crate::index_search::visit_filtered(idx, &query, &name_matches, |path| {
-                    if is_excluded(path, &indexes)?
+                    if exclusions.matches(path)?
                         || !matches_selection(path, scope.as_deref(), &options.extensions)?
                         || !matches_kind(path, options.dirs, options.files)?
                         || is_ignored_dir(path, &options.ignored_dirs)?
@@ -180,11 +183,8 @@ fn visit_plocate(
     scope: Option<&Path>,
     mut visit: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
-    let has_filters = indexes.iter().any(|idx| {
-        !idx.filters.exclude_extensions.is_empty()
-            || !idx.filters.exclude_files.is_empty()
-            || !idx.filters.exclude_paths.is_empty()
-    });
+    let exclusions = Exclusions::new(indexes);
+    let has_filters = !exclusions.indexes.is_empty();
     let post_filter = has_filters
         || scope.is_some()
         || !options.extensions.is_empty()
@@ -266,7 +266,7 @@ fn visit_plocate(
                 buf.pop();
             }
             if buf.is_empty()
-                || (has_filters && is_excluded(&buf, indexes)?)
+                || exclusions.matches(&buf)?
                 || !matches_selection(&buf, scope, &options.extensions)?
                 || !matches_kind(&buf, options.dirs, options.files)?
                 || is_ignored_dir(&buf, &options.ignored_dirs)?
@@ -336,12 +336,18 @@ fn resolve_scope(path: &Path) -> Result<PathBuf> {
 }
 
 fn matches_kind(path: &[u8], dirs: bool, files: bool) -> Result<bool> {
+    if !dirs && !files {
+        return Ok(true);
+    }
     let path = path_from_bytes(path)?;
     let is_file = path.extension().is_some_and(|ext| !ext.is_empty());
     Ok((!dirs || !is_file) && (!files || is_file))
 }
 
 fn is_ignored_dir(path: &[u8], names: &[String]) -> Result<bool> {
+    if names.is_empty() {
+        return Ok(false);
+    }
     let path = path_from_bytes(path)?;
     Ok(path.components().any(|part| {
         matches!(part, Component::Normal(name) if names.iter().any(|blocked| name.as_encoded_bytes() == blocked.as_bytes()))
@@ -365,53 +371,89 @@ fn map_mount_path(path: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> Result<bool> {
-    let path_obj = path_from_bytes(path)?;
-    Ok(scope.is_none_or(|root| {
-        crate::platform::portable_prefix(path, root.as_os_str().as_encoded_bytes())
-    }) && (extensions.is_empty()
-        || path_obj.extension().is_some_and(|ext| {
-            extensions.iter().any(|wanted| {
-                ext.as_encoded_bytes()
-                    .eq_ignore_ascii_case(wanted.trim_start_matches('.').as_bytes())
-            })
-        })))
+    if scope.is_some_and(|root| {
+        !crate::platform::portable_prefix(path, root.as_os_str().as_encoded_bytes())
+    }) {
+        return Ok(false);
+    }
+    if extensions.is_empty() {
+        return Ok(true);
+    }
+    Ok(path_from_bytes(path)?.extension().is_some_and(|ext| {
+        extensions.iter().any(|wanted| {
+            ext.as_encoded_bytes()
+                .eq_ignore_ascii_case(wanted.trim_start_matches('.').as_bytes())
+        })
+    }))
 }
 
-fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> Result<bool> {
-    let path_obj = path_from_bytes(path)?;
+struct Exclusions<'a> {
+    indexes: Vec<(&'a IndexConfig, Vec<PathBuf>)>,
+}
 
-    // A result should belong to exactly one configured root. Longest-prefix matching
-    // handles nested roots deterministically. Compare `/` paths so Windows and NAS indexes join.
-    let mut owner: Option<&IndexConfig> = None;
-    for idx in indexes {
-        if crate::platform::portable_prefix(path, idx.root.as_os_str().as_encoded_bytes())
-            && owner
-                .is_none_or(|current| idx.root.as_os_str().len() > current.root.as_os_str().len())
-        {
-            owner = Some(idx);
-        }
+impl<'a> Exclusions<'a> {
+    fn new(indexes: &[&'a IndexConfig]) -> Self {
+        let has_filters = indexes.iter().any(|idx| {
+            !idx.filters.exclude_paths.is_empty()
+                || !idx.filters.exclude_files.is_empty()
+                || !idx.filters.exclude_extensions.is_empty()
+        });
+        let mut indexes: Vec<_> = indexes
+            .iter()
+            .filter(|_| has_filters)
+            .map(|&idx| {
+                let paths = idx
+                    .filters
+                    .exclude_paths
+                    .iter()
+                    .map(|path| {
+                        if crate::platform::portable_absolute(path) {
+                            path.clone()
+                        } else {
+                            idx.root.join(path)
+                        }
+                    })
+                    .collect();
+                (idx, paths)
+            })
+            .collect();
+        // Keep unfiltered nested roots: they override filtered ancestors.
+        indexes.sort_by_key(|(idx, _)| std::cmp::Reverse(idx.root.as_os_str().len()));
+        Self { indexes }
     }
 
-    Ok(owner.is_some_and(|idx| {
-        idx.filters.exclude_paths.iter().any(|blocked| {
-            let blocked = if crate::platform::portable_absolute(blocked) {
-                blocked.clone()
-            } else {
-                idx.root.join(blocked)
-            };
+    fn matches(&self, path: &[u8]) -> Result<bool> {
+        let Some((idx, paths)) = self.indexes.iter().find(|(idx, _)| {
+            crate::platform::portable_prefix(path, idx.root.as_os_str().as_encoded_bytes())
+        }) else {
+            return Ok(false);
+        };
+        if paths.iter().any(|blocked| {
             crate::platform::portable_prefix(path, blocked.as_os_str().as_encoded_bytes())
-        }) || path_obj.file_name().is_some_and(|name| {
+        }) {
+            return Ok(true);
+        }
+        if idx.filters.exclude_files.is_empty() && idx.filters.exclude_extensions.is_empty() {
+            return Ok(false);
+        }
+        let path = path_from_bytes(path)?;
+        Ok(path.file_name().is_some_and(|name| {
             idx.filters.exclude_files.iter().any(|blocked| {
                 name.as_encoded_bytes()
                     .eq_ignore_ascii_case(blocked.as_bytes())
             })
-        }) || path_obj.extension().is_some_and(|ext| {
+        }) || path.extension().is_some_and(|ext| {
             idx.filters.exclude_extensions.iter().any(|blocked| {
                 ext.as_encoded_bytes()
                     .eq_ignore_ascii_case(blocked.trim_start_matches('.').as_bytes())
             })
-        })
-    }))
+        }))
+    }
+}
+
+#[cfg(all(test, unix))]
+fn is_excluded(path: &[u8], indexes: &[&IndexConfig]) -> Result<bool> {
+    Exclusions::new(indexes).matches(path)
 }
 
 #[cfg(all(test, unix))]

@@ -53,6 +53,13 @@ with tempfile.TemporaryDirectory(prefix='fs-parallel-e2e-') as temporary:
     py = [p for p in whole if b'py' in p.rsplit(b'/', 1)[-1]]
     assert paths('py') == py
     assert paths('py !path:d00') == [p for p in py if b'd00' not in p]
+    for expression in ['other path:d0600', '<other | py> path:d0600', 'other !path:d00']:
+        wanted = [p for p in whole if
+                  (b'other' in p.rsplit(b'/', 1)[-1] or
+                   ('|' in expression and b'py' in p.rsplit(b'/', 1)[-1])) and
+                  (b'd0600' in p if 'd0600' in expression else b'd00' not in p)]
+        assert paths(expression) == wanted
+        assert paths('--offset', '1', '-l', '2', expression) == wanted[1:3]
     assert paths('!py') == [p for p in whole if p not in py]
     assert paths('ext:c') == [p for p in whole if p.endswith(b'.c')]
     assert paths('--regex', 'py|other') == [p for p in whole if any(word in p.rsplit(b'/', 1)[-1] for word in [b'py', b'other'])]

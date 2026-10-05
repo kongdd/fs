@@ -15,19 +15,19 @@
 ```sh
 cargo build --release --bin fs
 python3 scripts/benchmarks/native.py --fs target/release/fs --native-only
-python3 scripts/benchmarks/plocate.py --config examples/config_nas.toml --query soil
+python3 scripts/benchmarks/plocate.py --config config/updatedb_nas.toml --query soil
 ```
 
-## release/
+## 发布打包
 
-`package.py TARGET` 仅打包已编译二进制，默认读取 `target/TARGET/release/fs`，支持 `CARGO_TARGET_DIR` 和 `--out`。
+`release_package.py TARGET` 仅打包已编译二进制，默认读取 `target/TARGET/release/fs`，支持 `CARGO_TARGET_DIR` 和 `--out`。
 
 ```sh
 cargo build --release --bin fs --target aarch64-apple-darwin
-python3 scripts/release/package.py aarch64-apple-darwin
+python3 scripts/release_package.py aarch64-apple-darwin
 ```
 
-## tools/
+## 辅助工具
 
 - `setup-plocate.py`：Linux 私有 plocate 工具，仅在显式选择 plocate 引擎时需要。
 - `index-and-count.sh`：更新当前配置的索引，再显示目录排行；通过 `FS_CONFIG` 指定配置。

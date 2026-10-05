@@ -17,4 +17,4 @@ e2e:
 
 package:
 	cargo build --locked --release --bin fs --target $(TARGET)
-	python3 scripts/release/package.py $(TARGET)
+	python3 scripts/release_package.py $(TARGET)

@@ -13,22 +13,22 @@ cargo build --release --bin fs
 ./target/release/fs stats
 ```
 
-路径统一用 `/`，包括 Windows 的 `C:/` 和网盘 `//server/share`，这样各系统生成的库可以互相查询。`updatedb` 在每台机器上扫描本机目录，写入该索引的 `database` 或 `update_database`。查询读取 `search_database`（通常是网盘上的库）；不指定索引名时，所有索引联合搜索，可用 `--path` 限制到某个网盘目录。配置示例见 [examples/](examples/)。
+路径统一用 `/`，包括 Windows 的 `C:/` 和网盘 `//server/share`，这样各系统生成的库可以互相查询。`updatedb` 在每台机器上扫描本机目录，写入该索引的 `database` 或 `update_database`。查询读取 `search_database`（通常是网盘上的库）；不指定索引名时，所有索引联合搜索，可用 `--path` 限制到某个网盘目录。配置示例见 [config/](config/)。
 
 ### 分离建库与查询配置
 
-- [updatedb_nas.toml](examples/updatedb_nas.toml)：NAS 建库，写入 `/volume1/CMIP6/.fs/`。
-- [updatedb_mac.toml](examples/updatedb_mac.toml)：Mac 本地建库，写入 `/Users/kongdd/.local/var/fs/mac.db`。
-- [seach.toml](examples/seach.toml)：Mac 联合查询 NAS 和本地库，格式从数据库头识别。
+- [updatedb_nas.toml](config/updatedb_nas.toml)：NAS 建库，写入 `/volume1/CMIP6/.fs/`。
+- [updatedb_mac.toml](config/updatedb_mac.toml)：Mac 本地建库，写入 `/Users/kongdd/.local/var/fs/mac.db`。
+- [seach.toml](config/seach.toml)：Mac 联合查询 NAS 和本地库，格式从数据库头识别。
 
 建库配置只需设置全局 `outdir`，每个索引按 `name` 生成 `<outdir>/<name>.db`；查询配置逐项填写完整的 `database` 路径。已有显式 `database`、`update_database`、`search_database` 配置仍兼容。两端均使用 Rust；NAS 使用新的数据库路径，不覆盖旧 plocate 库。按实际环境修改用户名和挂载路径；查询配置的 `root` 保持建库时的原始路径。文件名不会自动选择用途，须通过 `-c` 指定。
 
 ```sh
 # NAS
-fs -c examples/updatedb_nas.toml updatedb -j 8
+fs -c config/updatedb_nas.toml updatedb -j 8
 # Mac：先将 NAS /volume1/CMIP6 挂载到 /mnt/z
-fs -c examples/updatedb_mac.toml updatedb -j 8
-fs -c examples/seach.toml locate --mnt soil
+fs -c config/updatedb_mac.toml updatedb -j 8
+fs -c config/seach.toml locate --mnt soil
 ```
 
 配置查找顺序：`--config`、`FS_CONFIG`、旧 `NASFIND_CONFIG`、用户配置目录、系统配置目录。每个配置目录先找 `fs/config.toml`，再找旧 `nasfind/config.toml`；Windows 也查找 APPDATA。
@@ -70,7 +70,7 @@ export FS_ENGINE=rust      # 只影响当前进程，优先于配置文件
 fs updatedb --engine rust  # 只影响这一次命令
 ```
 
-优先级为 `--engine` > `FS_ENGINE` > 配置文件 `engine` > 内置默认 `rust`。切换默认值不会转换已有数据库，更新仍须选择与 DB 相符的后端。Linux 私有工具安装脚本为 `scripts/tools/setup-plocate.py`，不会创建系统级扫描任务。
+优先级为 `--engine` > `FS_ENGINE` > 配置文件 `engine` > 内置默认 `rust`。切换默认值不会转换已有数据库，更新仍须选择与 DB 相符的后端。Linux 私有工具安装脚本为 `scripts/setup-plocate.py`，不会创建系统级扫描任务。
 
 ## 布局
 
@@ -81,8 +81,9 @@ crates/
 └── locate/     # 检索、过滤、统计及 fs CLI
 scripts/
 ├── benchmarks/ # 基准测试及共用测量工具
-├── release/    # 发布包生成
-└── tools/      # 可选辅助工具
+├── release_package.py # 发布包生成
+├── setup-plocate.py   # 可选 plocate 工具安装
+└── index-and-count.sh # 索引更新与目录排行
 tests/
 ├── unit/       # core / updatedb / locate 单元测试
 ├── integration/# CLI 集成测试

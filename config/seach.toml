@@ -1,4 +1,4 @@
-# Mac query: fs -c examples/seach.toml locate --mnt soil
+# Mac query: fs -c config/seach.toml locate --mnt soil
 # Query only: use updatedb_nas.toml / updatedb_mac.toml for indexing.
 # Database formats are detected from their headers; no engine setting is needed.
 # Mount NAS /volume1/CMIP6 at /mnt/z before querying.

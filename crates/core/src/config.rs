@@ -359,9 +359,9 @@ fn normalize_engine(engine: Option<String>) -> Result<Option<String>> {
 }
 
 #[cfg(unix)]
-pub const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.example.toml");
+pub const EXAMPLE_CONFIG: &str = include_str!("../../../config/updatedb_nas.toml");
 #[cfg(windows)]
-pub const EXAMPLE_CONFIG: &str = include_str!("../../../examples/config.windows.toml");
+pub const EXAMPLE_CONFIG: &str = include_str!("../../../config/updatedb_win.toml");
 
 #[cfg(test)]
 #[path = "../../../tests/unit/core/config_outdir.rs"]

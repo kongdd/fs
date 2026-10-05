@@ -8,7 +8,7 @@ import tarfile
 import tomllib
 import zipfile
 
-root = pathlib.Path(__file__).resolve().parents[2]
+root = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("target")
 parser.add_argument("--out", type=pathlib.Path, default=root / "dist-out")
@@ -29,8 +29,8 @@ target_dir = root / os.environ.get("CARGO_TARGET_DIR", "target")
 shutil.copy2(target_dir / args.target / "release" / binary, package / binary)
 shutil.copy2(root / "INSTALL.md", package / "README.md")
 shutil.copy2(root / "LICENSE", package / "LICENSE")
-example = "config.windows.toml" if system == "windows" else "config.example.toml"
-shutil.copy2(root / "examples" / example, package / "config.toml.example")
+example = "updatedb_win.toml" if system == "windows" else "updatedb_nas.toml"
+shutil.copy2(root / "config" / example, package / "config.toml.example")
 if system != "windows":
     for script in ("install.sh", "uninstall.sh"):
         shutil.copy2(root / "dist" / script, package / script)

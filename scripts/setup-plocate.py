@@ -136,7 +136,7 @@ def install(destination, arch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--directory", type=Path, default=Path(__file__).resolve().parents[2] / "tools")
+    parser.add_argument("--directory", type=Path, default=Path(__file__).resolve().parents[1] / "tools")
     args = parser.parse_args()
     if platform.system() != "Linux":
         parser.error("private plocate tools require Linux")

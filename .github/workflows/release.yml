@@ -61,7 +61,7 @@ jobs:
           if [[ "$RUNNER_OS" == Linux ]]; then
             file "$BIN" | grep -E 'statically linked|static-pie linked'
           fi
-      - run: python scripts/release/package.py "$TARGET"
+      - run: python scripts/release_package.py "$TARGET"
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}

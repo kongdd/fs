@@ -143,7 +143,7 @@ def check(command, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default='examples/config_nas.toml')
+    parser.add_argument('--config', default='config/updatedb_nas.toml')
     parser.add_argument('--index', default='cmip6')
     parser.add_argument('--fs', default='target/release/fs')
     parser.add_argument('--runs', type=int, default=6)

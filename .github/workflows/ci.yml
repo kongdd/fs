@@ -88,6 +88,6 @@ jobs:
       - name: Check scripts
         run: |
           python -m compileall -q scripts tests/integration
-          for script in scripts/benchmarks/*.py scripts/tools/*.py scripts/release/*.py; do
+          for script in scripts/benchmarks/*.py scripts/*.py; do
             if [[ "$script" != *common.py ]]; then python "$script" --help > /dev/null; fi
           done

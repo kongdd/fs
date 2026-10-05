@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Cross-platform filesystem locator"
 
+[[bin]]
+name = "fs"
+path = "crates/main.rs"
+
 [dependencies]
 fs-locate = { path = "crates/locate" }
 fs-updatedb = { path = "crates/updatedb" }

@@ -92,8 +92,8 @@ fn split_configs_use_matching_roots_and_databases() {
     for idx in nas.index.iter().chain(&mac.index) {
         let selected = search.select(std::slice::from_ref(&idx.name)).unwrap();
         assert_eq!(selected[0].root, idx.root);
-        let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume1/CMIP6") {
-            PathBuf::from("/mnt/z").join(relative)
+        let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume2") {
+            PathBuf::from("/mnt/x").join(relative)
         } else {
             idx.update_database().to_path_buf()
         };

@@ -33,4 +33,4 @@ database = "/mnt/x/config/fs/researches.db"
 [[index]]
 name = "mac"
 root = "/Users/kongdd"
-database = "/Users/kongdd/.local/var/fs/mac.db"
+database = "/Users/kongdd/.config/fs/mac.db"

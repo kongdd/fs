@@ -127,6 +127,16 @@ fn config_engine_rewrites_quoted_keys_without_changing_other_text() {
 }
 
 #[test]
+fn nas_updatedb_accepts_config_and_compact_jobs() {
+    let args = ["fs", "-c", "config/updatedb_nas.toml", "updatedb", "-j4"];
+    let normalized = normalize_implicit_search(args.into_iter().map(OsString::from).collect());
+    assert_eq!(normalized, args.map(OsString::from));
+    let cli = parse_without_engine_env(&args);
+    assert_eq!(cli.config, Some(PathBuf::from("config/updatedb_nas.toml")));
+    assert!(matches!(cli.command, Commands::Index { jobs: 4, .. }));
+}
+
+#[test]
 fn updatedb_jobs_controls_scan_threads() {
     let cli = parse_without_engine_env(&["fs", "updatedb", "-j", "4"]);
     assert!(matches!(cli.command, Commands::Index { jobs: 4, .. }));

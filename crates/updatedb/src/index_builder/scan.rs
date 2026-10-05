@@ -1,6 +1,5 @@
-//! Bounded read-ahead for fresh builds. Only the caller touches SQLite.
+//! Bounded fresh-build read-ahead and incremental stat batches. Workers never touch SQLite.
 use std::{
-    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     io::ErrorKind,
@@ -565,23 +564,24 @@ fn scan_tree_parallel(
     Ok(())
 }
 
-/// Parallel directory stats for incremental updates. Filesystem only.
+/// A bounded batch of directory stats; SQLite stays on the caller thread.
+pub(super) type DirectoryStat = (PathBuf, std::io::Result<Vec<u8>>);
+type StatJob = (usize, Vec<PathBuf>);
+type StatResult = (usize, Vec<DirectoryStat>);
+const STAT_BATCH_SIZE: usize = 32;
+
 pub(super) struct StatPool {
-    root: PathBuf,
-    capacity: usize,
-    submitted: HashSet<PathBuf>,
-    job_tx: Option<SyncSender<PathBuf>>,
-    res_rx: Option<mpsc::Receiver<(PathBuf, std::io::Result<Vec<u8>>)>>,
-    ready: HashMap<PathBuf, std::io::Result<Vec<u8>>>,
+    jobs: usize,
+    job_tx: Option<SyncSender<StatJob>>,
+    res_rx: Option<mpsc::Receiver<StatResult>>,
     workers: Vec<JoinHandle<()>>,
 }
 
 impl StatPool {
     pub fn new(root: &Path, jobs: usize) -> Self {
         let jobs = jobs.clamp(1, 256);
-        let capacity = jobs * 2;
-        let (job_tx, job_rx) = mpsc::sync_channel::<PathBuf>(capacity);
-        let (res_tx, res_rx) = mpsc::sync_channel::<(PathBuf, std::io::Result<Vec<u8>>)>(capacity);
+        let (job_tx, job_rx) = mpsc::sync_channel::<StatJob>(jobs);
+        let (res_tx, res_rx) = mpsc::sync_channel::<StatResult>(jobs);
         let job_rx = Arc::new(Mutex::new(job_rx));
         let mut workers = Vec::with_capacity(jobs);
         for index in 0..jobs {
@@ -593,13 +593,16 @@ impl StatPool {
                     .name(format!("fs-stat-{index}"))
                     .spawn(move || {
                         loop {
-                            let path = {
-                                let rx = job_rx.lock().unwrap();
-                                rx.recv()
-                            };
-                            let Ok(path) = path else { break };
-                            let result = stamp_io(&path, &root);
-                            if res_tx.send((path, result)).is_err() {
+                            let job = job_rx.lock().unwrap().recv();
+                            let Ok((offset, paths)) = job else { break };
+                            let results = paths
+                                .into_iter()
+                                .map(|path| {
+                                    let result = stamp_io(&path, &root);
+                                    (path, result)
+                                })
+                                .collect();
+                            if res_tx.send((offset, results)).is_err() {
                                 break;
                             }
                         }
@@ -609,51 +612,54 @@ impl StatPool {
         }
         drop(res_tx);
         Self {
-            root: root.to_path_buf(),
-            capacity,
-            submitted: HashSet::new(),
+            jobs,
             job_tx: Some(job_tx),
             res_rx: Some(res_rx),
-            ready: HashMap::new(),
             workers,
         }
     }
 
-    pub fn submit(&mut self, path: PathBuf) {
-        // Bound queued jobs, results and the reorder cache together. Never
-        // block the caller here: it is also the only result consumer.
-        if self.submitted.len() < self.capacity
-            && !self.submitted.contains(&path)
-            && let Some(tx) = &self.job_tx
-            && tx.try_send(path.clone()).is_ok()
-        {
-            self.submitted.insert(path);
+    pub fn take_batch(&mut self, pending: &mut Vec<PathBuf>) -> Result<Vec<DirectoryStat>> {
+        let count = pending.len().min(self.jobs * STAT_BATCH_SIZE);
+        if count == 0 {
+            return Ok(Vec::new());
         }
-    }
-
-    pub fn prefetch(&mut self, paths: &[PathBuf]) {
-        for path in paths.iter().rev().take(self.capacity) {
-            self.submit(path.clone());
-        }
-    }
-
-    pub fn take(&mut self, path: &Path) -> std::io::Result<Vec<u8>> {
-        if !self.submitted.contains(path) {
-            return stamp_io(path, &self.root);
-        }
-        loop {
-            if let Some(result) = self.ready.remove(path) {
-                self.submitted.remove(path);
-                return result;
-            }
-            let (done, result) = self
-                .res_rx
+        // Only pending siblings/frontier nodes are checked, never descendants
+        // of an unchecked ancestor (which could have become a symlink).
+        let paths: Vec<_> = pending.drain(pending.len() - count..).rev().collect();
+        // Distribute small frontiers across workers too, not all to one worker.
+        let chunk_size = count.div_ceil(self.jobs);
+        let mut paths = paths.into_iter();
+        let mut batches = 0;
+        while paths.len() > 0 {
+            let chunk = paths.by_ref().take(chunk_size).collect();
+            self.job_tx
                 .as_ref()
-                .ok_or_else(|| std::io::Error::other("stat pool closed"))?
-                .recv()
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            self.ready.insert(done, result);
+                .context("stat pool closed")?
+                .send((batches, chunk))
+                .context("stat workers disconnected")?;
+            batches += 1;
         }
+        // At most jobs messages are outstanding; both queues can hold them.
+        // Sending all jobs before receiving cannot deadlock with a full queue.
+        let mut results = Vec::with_capacity(batches);
+        for _ in 0..batches {
+            results.push(
+                self.res_rx
+                    .as_ref()
+                    .context("stat pool closed")?
+                    .recv()
+                    .context("stat workers disconnected")?,
+            );
+        }
+        results.sort_unstable_by_key(|(offset, _)| *offset);
+        // The caller pops the last element, preserving stack traversal order
+        // within a batch without a per-path hash/reorder cache.
+        Ok(results
+            .into_iter()
+            .flat_map(|(_, batch)| batch)
+            .rev()
+            .collect())
     }
 }
 

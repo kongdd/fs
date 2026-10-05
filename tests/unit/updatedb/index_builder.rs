@@ -273,11 +273,79 @@ fn no_change_update_preserves_database_fingerprint() {
     fs::write(fixture.idx.root.join("file.nc"), b"").unwrap();
     update(&fixture.idx, None, false).unwrap();
     let before = fs::metadata(&fixture.idx.database).unwrap();
+    let bytes = fs::read(&fixture.idx.database).unwrap();
+    for jobs in [1, 4] {
+        let report = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        let after = fs::metadata(&fixture.idx.database).unwrap();
+        assert_eq!(report.entries, 2);
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.reused, 1);
+        assert_eq!(
+            (before.len(), before.mtime(), before.mtime_nsec()),
+            (after.len(), after.mtime(), after.mtime_nsec())
+        );
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn old_database_without_optional_count_cache_stays_unchanged() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.idx.root.join("nested/deep")).unwrap();
+    fs::write(fixture.idx.root.join("nested/deep/file.nc"), b"").unwrap();
+    let first = update(&fixture.idx, None, false).unwrap();
+    Connection::open(&fixture.idx.database)
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER fs_count_insert; DROP TRIGGER fs_count_delete;
+         DROP TRIGGER fs_count_update; DELETE FROM meta WHERE key='entry_count';",
+        )
+        .unwrap();
+    let before = fs::read(&fixture.idx.database).unwrap();
+    let metadata = fs::metadata(&fixture.idx.database).unwrap();
+    for jobs in [1, 4] {
+        let report = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(report.entries, first.entries);
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.reused, 3);
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&fixture.idx.database)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            metadata.modified().unwrap()
+        );
+    }
+}
+
+#[test]
+fn count_cache_tracks_scoped_changes_and_full_directory_deletions() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.idx.root.join("left/deep")).unwrap();
+    fs::create_dir_all(fixture.idx.root.join("right/deep")).unwrap();
+    fs::write(fixture.idx.root.join("left/deep/old.nc"), b"").unwrap();
+    fs::write(fixture.idx.root.join("right/deep/keep.nc"), b"").unwrap();
     update(&fixture.idx, None, false).unwrap();
-    let after = fs::metadata(&fixture.idx.database).unwrap();
+    next_stamp_second();
+    fs::write(fixture.idx.root.join("left/deep/new.nc"), b"").unwrap();
+    let scoped =
+        update_with_jobs(&fixture.idx, Some(&fixture.idx.root.join("left")), false, 4).unwrap();
     assert_eq!(
-        (before.len(), before.mtime(), before.mtime_nsec()),
-        (after.len(), after.mtime(), after.mtime_nsec())
+        scoped.entries as usize,
+        fixture.query(&["*"], false, false, false).len()
+    );
+    fs::remove_dir_all(fixture.idx.root.join("left")).unwrap();
+    let deleted = update_with_jobs(&fixture.idx, None, false, 4).unwrap();
+    assert_eq!(deleted.entries, 4);
+    let before = fs::read(&fixture.idx.database).unwrap();
+    let unchanged = update_with_jobs(&fixture.idx, None, false, 4).unwrap();
+    assert_eq!(unchanged.entries, deleted.entries);
+    assert_eq!(unchanged.scanned, 0);
+    assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+    assert_eq!(
+        incremental::cached_entry_count(&open_read(&fixture.idx.database).unwrap()).unwrap(),
+        Some(deleted.entries)
     );
 }
 
@@ -1259,21 +1327,21 @@ fn scoped_directory_ranges_match_component_prefixes_with_raw_bytes() {
 #[test]
 fn bounded_parallel_stats_keep_wide_tree_updates_complete() {
     let fixture = Fixture::new();
-    for n in 0..32 {
+    for n in 0..256 {
         let directory = fixture.idx.root.join(format!("d{n:02}/child"));
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("old.nc"), b"").unwrap();
     }
     update(&fixture.idx, None, false).unwrap();
     let report = update_with_jobs(&fixture.idx, None, false, 4).unwrap();
-    assert_eq!(report.reused, 65);
+    assert_eq!(report.reused, 513);
     assert_eq!(report.scanned, 0);
     next_stamp_second();
     fs::remove_file(fixture.idx.root.join("d00/child/old.nc")).unwrap();
     fs::write(fixture.idx.root.join("d00/child/new.nc"), b"").unwrap();
     fs::remove_dir_all(fixture.idx.root.join("d01")).unwrap();
     update_with_jobs(&fixture.idx, None, false, 4).unwrap();
-    assert_eq!(fixture.query(&["old.nc"], true, false, false).len(), 30);
+    assert_eq!(fixture.query(&["old.nc"], true, false, false).len(), 254);
     assert_eq!(fixture.query(&["new.nc"], true, false, false).len(), 1);
 }
 

@@ -1,5 +1,6 @@
-/target/
-/crates/*/target/
+target
+build
+
 *.db
 .DS_Store
 @eaDir/

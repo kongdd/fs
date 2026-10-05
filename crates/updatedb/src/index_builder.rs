@@ -2,8 +2,7 @@
 use crate::{
     config::IndexConfig,
     platform::{
-        directory_stamp as stamp, os_string, path_bytes, path_from_bytes, path_starts_with,
-        same_path, stamp_matches,
+        directory_stamp as stamp, os_string, path_bytes, path_starts_with, same_path, stamp_matches,
     },
     ui::{self, Tone},
 };
@@ -21,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod directory_grams;
+mod incremental;
 mod scan;
 use directory_grams::DirectoryGrams;
 
@@ -223,8 +223,7 @@ fn write_scan_progress(
         return Ok(());
     }
     let status = scan_progress(done, expected, started.elapsed(), current);
-    write!(std::io::stderr(), "\r\x1b[2K{label}: {status}")?;
-    std::io::stderr().flush()?;
+    ui::write_progress(Tone::Info, format_args!("{label}: {status}"))?;
     *last = Instant::now();
     Ok(())
 }
@@ -236,7 +235,7 @@ fn scan_progress(done: f64, expected: u64, elapsed: Duration, current: &Path) ->
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| current.display().to_string());
     if expected == 0 {
-        return format!("{done:.0} dirs · {rate:.0}/s · ETA unavailable · {place}");
+        return format!("{done:.0} dirs · {rate:.0}/s · ETA -- · {place}");
     }
     let fraction = (done / expected as f64).clamp(0.0, 0.99);
     let filled = (fraction * 8.0) as usize;
@@ -737,7 +736,7 @@ fn clear_postings(
 }
 
 fn retain_indexed(
-    transaction: &rusqlite::Transaction,
+    snapshot: &incremental::DirectorySnapshot,
     paths: &DirectoryPaths,
     directory: &Path,
     id: i64,
@@ -746,47 +745,29 @@ fn retain_indexed(
     let mut stack = vec![(id, directory.to_path_buf())];
     while let Some((id, directory)) = stack.pop() {
         visited.insert(id);
-        let names = transaction
-            .prepare_cached("SELECT name FROM children WHERE directory=?")?
-            .query_map([id], |r| r.get::<_, Vec<u8>>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for name in names {
-            let child = directory.join(os_string(name)?);
-            let stored = paths.encode(&child)?;
-            let child_id: Option<i64> = transaction
-                .prepare_cached("SELECT id FROM directories WHERE path=?")?
-                .query_row([stored.as_ref()], |r| r.get(0))
-                .optional()?;
-            if let Some(child_id) = child_id
-                && !visited.contains(&child_id)
-            {
-                stack.push((child_id, child));
+        let stored = paths.encode(&directory)?;
+        if let Some(previous) = snapshot.directories.get(stored.as_ref()) {
+            for name in &previous.children {
+                let child = directory.join(name);
+                let stored = paths.encode(&child)?;
+                if let Some(previous) = snapshot.directories.get(stored.as_ref())
+                    && !visited.contains(&previous.id)
+                {
+                    stack.push((previous.id, child));
+                }
             }
         }
     }
     Ok(())
 }
 
-fn scoped_directories(connection: &Connection, mut scope: &[u8]) -> Result<Vec<(i64, Vec<u8>)>> {
-    while let Some(parent) = scope.strip_suffix(b"/") {
-        scope = parent;
-    }
-    let row = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?));
-    if scope.is_empty() {
-        return Ok(connection
-            .prepare("SELECT id,path FROM directories")?
-            .query_map([], row)?
-            .collect::<rusqlite::Result<_>>()?);
-    }
-    let mut lower = scope.to_vec();
-    lower.push(b'/');
-    let mut upper = lower.clone();
-    // All descendants lie in [scope + "/", scope + "0").
-    *upper.last_mut().unwrap() = b'0';
-    Ok(connection
-        .prepare("SELECT id,path FROM directories WHERE path=?1 OR (path>=?2 AND path<?3)")?
-        .query_map(params![scope, lower, upper], row)?
-        .collect::<rusqlite::Result<_>>()?)
+#[cfg(all(test, unix))]
+fn scoped_directories(connection: &Connection, scope: &[u8]) -> Result<Vec<(i64, Vec<u8>)>> {
+    Ok(incremental::DirectorySnapshot::load(connection, scope)?
+        .directories
+        .into_iter()
+        .map(|(path, directory)| (directory.id, path))
+        .collect())
 }
 
 /// Directory mtime permits reusing its immediate entries, NOT skipping its
@@ -834,6 +815,7 @@ pub fn update_with_exclusions(
          PRAGMA temp_store=FILE;",
     )?;
     let transaction = connection.transaction()?;
+    let initial_changes = transaction.total_changes();
     if !existing {
         schema(&transaction)?;
     } else {
@@ -867,6 +849,14 @@ pub fn update_with_exclusions(
     }
     let force = old_key.as_ref() != Some(&key);
     let scan_root = scope.unwrap_or(&idx.root);
+    let stored_scope = paths.encode(scan_root)?;
+    let snapshot_start = Instant::now();
+    let snapshot = if existing {
+        incremental::DirectorySnapshot::load(&transaction, &stored_scope)?
+    } else {
+        incremental::DirectorySnapshot::default()
+    };
+    let snapshot_elapsed = snapshot_start.elapsed();
     let rules = ScanRules::with_exclusions(idx, extra_exclusions);
     let mut scanner = if existing {
         None
@@ -881,23 +871,21 @@ pub fn update_with_exclusions(
     let mut pending = vec![scan_root.to_path_buf()];
     let mut stat_pool =
         (existing && jobs > 1).then(|| scan::StatPool::new(&idx.root, jobs as usize));
-    let mut visited = HashSet::new();
-    let mut report = UpdateReport::default();
+    let mut stat_ready = Vec::new();
+    let mut visited = HashSet::with_capacity(snapshot.directories.len());
+    let mut new_directories = Vec::new();
+    let mut report = UpdateReport {
+        scan_elapsed: snapshot_elapsed,
+        ..Default::default()
+    };
     if progress {
         ui::enable_ansi();
     }
-    let expected_dirs: u64 = if existing {
-        transaction
-            .query_row("SELECT COUNT(*) FROM directories", [], |row| row.get(0))
-            .map(|count: i64| count.max(0) as u64)?
-    } else {
-        0
-    };
+    let expected_dirs = snapshot.directories.len() as u64;
     let progress_started = Instant::now();
     let terminal = progress && std::io::stderr().is_terminal();
     let live_line = LiveLine(terminal);
     let label: String = idx.name.chars().take(12).collect();
-    let label = ui::paint(&label, Tone::Info, ui::stderr_color());
     let mut last = Instant::now();
     let mut batch = if existing {
         PostingWriter::Update(PostingBatch::default())
@@ -931,17 +919,21 @@ pub fn update_with_exclusions(
             };
             (directory.path, directory.before, Some(directory.entries))
         } else {
-            if let Some(pool) = &mut stat_pool {
-                pool.prefetch(&pending);
-            }
-            let Some(directory) = pending.pop() else {
+            let next = if let Some(pool) = &mut stat_pool {
+                if stat_ready.is_empty() {
+                    stat_ready = pool.take_batch(&mut pending)?;
+                }
+                stat_ready.pop()
+            } else {
+                pending.pop().map(|directory| {
+                    let before = scan::stamp_io(&directory, &idx.root);
+                    (directory, before)
+                })
+            };
+            let Some((directory, before)) = next else {
                 break;
             };
-            let before = match stat_pool
-                .as_mut()
-                .map(|pool| pool.take(&directory))
-                .unwrap_or_else(|| scan::stamp_io(&directory, &idx.root))
-            {
+            let before = match before {
                 Ok(stamp) => stamp,
                 Err(error) => {
                     let vanished = matches!(
@@ -957,12 +949,14 @@ pub fn update_with_exclusions(
                     report.skipped += 1;
                     if existing && !vanished {
                         let stored = paths.encode(&directory)?;
-                        let id: Option<i64> = transaction
-                            .prepare_cached("SELECT id FROM directories WHERE path=?")?
-                            .query_row([stored.as_ref()], |row| row.get(0))
-                            .optional()?;
-                        if let Some(id) = id {
-                            retain_indexed(&transaction, &paths, &directory, id, &mut visited)?;
+                        if let Some(previous) = snapshot.directories.get(stored.as_ref()) {
+                            retain_indexed(
+                                &snapshot,
+                                &paths,
+                                &directory,
+                                previous.id,
+                                &mut visited,
+                            )?;
                         }
                     }
                     continue;
@@ -972,21 +966,18 @@ pub fn update_with_exclusions(
         };
         let sql_start = profiling.then(Instant::now);
         let stored_path = paths.encode(&directory)?;
-        let previous: Option<(i64, Vec<u8>)> = if existing {
-            transaction
-                .prepare_cached("SELECT id,stamp FROM directories WHERE path=?")?
-                .query_row([stored_path.as_ref()], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?
-        } else {
-            None
-        };
-        let id = if let Some((id, _)) = &previous {
-            *id
+        let previous = snapshot.directories.get(stored_path.as_ref());
+        let id = if let Some(previous) = previous {
+            previous.id
         } else {
             transaction
                 .prepare_cached("INSERT INTO directories(path,stamp) VALUES (?,?)")?
                 .execute(params![stored_path.as_ref(), &before])?;
-            transaction.last_insert_rowid()
+            let id = transaction.last_insert_rowid();
+            if existing {
+                new_directories.push(id);
+            }
+            id
         };
         if let Some(start) = sql_start {
             directory_sql_elapsed += start.elapsed();
@@ -994,21 +985,15 @@ pub fn update_with_exclusions(
         if existing {
             visited.insert(id);
         }
-        if !force
-            && previous
-                .as_ref()
-                .is_some_and(|(_, old)| stamp_matches(old, &before))
-        {
-            let children = transaction
-                .prepare_cached("SELECT name FROM children WHERE directory=? ORDER BY name")?
-                .query_map([id], |r| r.get::<_, Vec<u8>>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let children = children
-                .into_iter()
-                .rev()
-                .map(|p| os_string(p).map(|name| directory.join(name)))
-                .collect::<Result<Vec<_>>>()?;
-            pending.extend(children);
+        if !force && previous.is_some_and(|previous| stamp_matches(&previous.stamp, &before)) {
+            let previous = previous.expect("reused directory has a stored stamp");
+            pending.extend(
+                previous
+                    .children
+                    .iter()
+                    .rev()
+                    .map(|name| directory.join(name)),
+            );
             report.reused += 1;
             report.scan_elapsed += scan_start.elapsed();
         } else {
@@ -1041,7 +1026,7 @@ pub fn update_with_exclusions(
                         scan::warn_unreadable(&directory, &error);
                         report.skipped += 1;
                         if previous.is_some() && !vanished {
-                            retain_indexed(&transaction, &paths, &directory, id, &mut visited)?;
+                            retain_indexed(&snapshot, &paths, &directory, id, &mut visited)?;
                         } else if existing {
                             visited.remove(&id);
                         }
@@ -1188,48 +1173,59 @@ pub fn update_with_exclusions(
         ui::log(
             Tone::Info,
             format_args!(
-                "scan-detail writer: directory_sql {:.6}s · post_metadata {:.6}s",
+                "scan-detail writer: snapshot {:.6}s · directory_lookup {:.6}s · post_metadata {:.6}s",
+                snapshot_elapsed.as_secs_f64(),
                 directory_sql_elapsed.as_secs_f64(),
                 post_metadata_elapsed.as_secs_f64(),
             ),
         );
     }
     let finalize_start = Instant::now();
-    batch.flush(&transaction)?;
-    if !existing {
-        // Bulk index construction avoids per-directory B-tree maintenance and
-        // leaves the same lookup/uniqueness guarantees on committed indexes.
-        transaction.execute_batch(
-            "CREATE UNIQUE INDEX directory_paths ON directories(path);
-             CREATE INDEX directory_blocks ON blocks(directory);",
-        )?;
-    }
-    // Query only the updated subtree; BLOB ranges preserve raw filename bytes.
-    let stored_scope = paths.encode(scan_root)?;
-    let old_directories = if existing {
-        scoped_directories(&transaction, &stored_scope)?
-    } else {
-        Vec::new()
-    };
-    let stored_scope = path_from_bytes(&stored_scope)?;
-    for (id, path) in old_directories {
-        let path = path_from_bytes(&path)?;
-        if path.starts_with(stored_scope.as_ref()) && !visited.contains(&id) {
-            clear_postings(&transaction, id, &mut gram_codec)?;
-            transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
-            transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
-            transaction.execute("DELETE FROM directories WHERE id=?", [id])?;
+    let unchanged = existing
+        && !force
+        && report.scanned == 0
+        && new_directories.is_empty()
+        && visited.len() == snapshot.directories.len();
+    if !unchanged {
+        batch.flush(&transaction)?;
+        if !existing {
+            transaction.execute_batch(
+                "CREATE UNIQUE INDEX directory_paths ON directories(path);
+                 CREATE INDEX directory_blocks ON blocks(directory);",
+            )?;
+        }
+        // The snapshot covers exactly the selected scope. No second directory
+        // SQL scan, path decoding, or component-prefix check is needed.
+        for id in snapshot
+            .directories
+            .values()
+            .map(|directory| directory.id)
+            .chain(new_directories)
+        {
+            if !visited.contains(&id) {
+                clear_postings(&transaction, id, &mut gram_codec)?;
+                transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
+                transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
+                transaction.execute("DELETE FROM directories WHERE id=?", [id])?;
+            }
+        }
+        if !existing {
+            gram_codec.finish_fresh(&transaction)?;
+        }
+        if force {
+            transaction.execute("INSERT INTO meta(key,value) VALUES ('filters',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&key])?;
         }
     }
-    if !existing {
-        gram_codec.finish_fresh(&transaction)?;
+    if !existing || transaction.total_changes() != initial_changes {
+        report.entries = incremental::count_entries(&transaction)?;
+        incremental::store_entry_count(&transaction, report.entries)?;
+    } else {
+        // Old databases missing optional metadata remain read-only too.
+        report.entries = match incremental::cached_entry_count(&transaction)? {
+            Some(count) => count,
+            None => incremental::count_entries(&transaction)?,
+        };
     }
-    if force {
-        transaction.execute("INSERT INTO meta(key,value) VALUES ('filters',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&key])?;
-    }
-    report.entries = transaction.query_row("SELECT COALESCE(SUM(n),0) FROM blocks", [], |r| {
-        r.get::<_, i64>(0)
-    })? as u64;
     transaction.commit()?;
     report.finalize_elapsed = finalize_start.elapsed();
     drop(live_line);
@@ -1259,6 +1255,9 @@ pub fn update_with_exclusions(
 }
 
 #[cfg(all(test, unix))]
+use crate::platform::path_from_bytes;
+
+#[cfg(all(test, unix))]
 #[path = "../../../tests/unit/updatedb/index_builder.rs"]
 mod tests;
 
@@ -1280,6 +1279,6 @@ mod progress_tests {
         assert!(status.contains("ETA ~0m10s"), "{status}");
         assert!(status.contains("Windows"), "{status}");
         let fresh = scan_progress(12.0, 0, Duration::from_secs(2), Path::new("c:/"));
-        assert!(fresh.contains("ETA unavailable"), "{fresh}");
+        assert!(fresh.contains("ETA --"), "{fresh}");
     }
 }

@@ -13,24 +13,24 @@ Linux 发布包静态链接；Windows 静态链接 C 运行库。macOS 二进制
 Linux / macOS：
 
 ```sh
-./fs init
+fs init
 # 编辑 ~/.config/fs/config.toml，设置扫描目录和数据库路径
-./fs updatedb --engine rust
-./fs locate soil
-./fs stats
+fs updatedb --engine rust
+fs locate soil
+fs stats
 ```
 
 Windows PowerShell：
 
 ```powershell
-.\fs.exe init
+fs.exe init
 # 编辑 $HOME\.config\fs\config.toml，路径写成 C:/data 或 C:
-.\fs.exe updatedb --engine rust
-.\fs.exe locate soil
-.\fs.exe stats
+fs.exe updatedb --engine rust
+fs.exe locate soil
+fs.exe stats
 ```
 
-Unix 可运行 `sh install.sh` 安装到 `$HOME/.local/bin`；或将可执行文件直接放到 PATH 中。数据库可以放在扫描根目录之内，建库时会跳过数据库文件、锁文件和 SQLite 旁路文件。Windows 输出路径使用 `/`。
+将可执行文件放到 PATH 中即可安装；卸载时删除该文件，配置和数据库保留。数据库可以放在扫描根目录之内，建库时会跳过数据库文件、锁文件和 SQLite 旁路文件。Windows 输出路径使用 `/`。
 
 默认引擎是 `rust`。Linux 可用 `fs config engine plocate` 改用 plocate；其他系统只有 `fs config engine rust`。也可临时用 `FS_ENGINE`。优先级为 `--engine` > `FS_ENGINE` > 配置文件 > 内置默认 `rust`。切换默认值不会转换已有 DB。
 

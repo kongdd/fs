@@ -73,6 +73,9 @@ jobs:
           python tests/integration/test-native.py "$BIN"
           python tests/integration/test-everything.py "$BIN"
           python tests/integration/test-engine-default.py "$BIN"
+      - name: Single-row progress integration
+        if: runner.os == 'Linux'
+        run: python tests/integration/test-progress.py target/release/fs
       - name: Prepare plocate without system-wide indexing
         if: runner.os == 'Linux'
         timeout-minutes: 3

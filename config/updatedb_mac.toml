@@ -1,7 +1,7 @@
 # Mac: fs -c config/updatedb_mac.toml updatedb -j 8
 # Adjust /Users/kongdd here and in seach.toml for another user.
 engine = "rust"
-outdir = "/Users/kongdd/.local/var/fs"
+outdir = "/Users/kongdd/.config/fs"
 
 [filters]
 exclude_dirs = [
@@ -16,4 +16,4 @@ exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini"]
 [[index]]
 name = "mac"
 root = "/Users/kongdd"
-exclude_paths = [".local/var/fs"]
+exclude_paths = []

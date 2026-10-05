@@ -52,7 +52,7 @@ fn progress_never_claims_completion_from_an_estimate() {
     assert!(status.contains("past estimate; ETA unknown"));
     let first_run = progress_status(0, Duration::ZERO, None, false);
     assert!(!first_run.contains('%'));
-    assert!(first_run.contains("ETA unavailable"));
+    assert!(first_run.contains("ETA --"));
     let finalizing = progress_status(50, Duration::from_secs(10), Some(100), true);
     assert!(finalizing.contains("finishing; ETA unknown"));
 }

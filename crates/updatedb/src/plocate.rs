@@ -420,7 +420,7 @@ fn build_one(cfg: &Config, idx: &IndexConfig, progress: bool) -> Result<()> {
         ui::log(
             Tone::Warning,
             format_args!(
-                "{}: preparing whitespace directory exclusions (ETA unavailable)",
+                "{}: preparing whitespace directory exclusions (ETA --)",
                 idx.name
             ),
         );
@@ -538,25 +538,15 @@ fn wait_with_progress(
                     expected,
                     reader.is_finished(),
                 );
-                let color = ui::stderr_color();
-                let name = ui::paint(name, Tone::Info, color);
-                let status = ui::paint(
-                    &status,
-                    if reader.is_finished()
-                        || expected.is_some_and(|total| processed.load(Ordering::Relaxed) >= total)
-                    {
-                        Tone::Warning
-                    } else {
-                        Tone::Info
-                    },
-                    color,
-                );
-                // Carriage return + erase, never a newline: replace the same row.
-                write!(std::io::stderr(), "\r\x1b[2K{name}: {status}")
+                let tone = if reader.is_finished()
+                    || expected.is_some_and(|total| processed.load(Ordering::Relaxed) >= total)
+                {
+                    Tone::Warning
+                } else {
+                    Tone::Info
+                };
+                ui::write_progress(tone, format_args!("{name}: {status}"))
                     .context("failed to write progress")?;
-                std::io::stderr()
-                    .flush()
-                    .context("failed to flush progress")?;
                 last_report = Instant::now();
             }
             thread::sleep(Duration::from_millis(100));
@@ -615,7 +605,7 @@ fn progress_status(
                 if finalizing {
                     "finishing; ETA unknown"
                 } else {
-                    "ETA unavailable"
+                    "ETA --"
                 }
                 .into(),
             )

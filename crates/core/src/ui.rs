@@ -1,4 +1,5 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy)]
 pub enum Tone {
@@ -35,6 +36,54 @@ pub fn paint(text: &str, tone: Tone, color: bool) -> String {
 
 pub fn log(tone: Tone, message: std::fmt::Arguments<'_>) {
     eprintln!("{}", paint(&message.to_string(), tone, stderr_color()));
+}
+
+/// Replace one terminal row, clipping before coloring to prevent automatic wrapping.
+pub fn write_progress(tone: Tone, message: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    #[cfg(any(unix, windows))]
+    let width = terminal_size::terminal_size_of(std::io::stderr())
+        .map(|(terminal_size::Width(width), _)| usize::from(width))
+        .filter(|&width| width > 0);
+    #[cfg(not(any(unix, windows)))]
+    let width: Option<usize> = None;
+    let width = width
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()?
+                .parse()
+                .ok()
+                .filter(|&w| w > 0)
+        })
+        .unwrap_or(80);
+    // Leave the last column unused: some terminals wrap as soon as it is filled.
+    let line = fit_progress(&message.to_string(), width.saturating_sub(1));
+    let mut stderr = std::io::stderr().lock();
+    write!(stderr, "\r\x1b[2K{}", paint(&line, tone, stderr_color()))?;
+    stderr.flush()
+}
+
+fn fit_progress(message: &str, columns: usize) -> String {
+    // Filenames can contain newlines, tabs and terminal control characters.
+    let clean: String = message
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if clean.width() <= columns {
+        return clean;
+    }
+    if columns == 0 {
+        return String::new();
+    }
+    let mut clipped = String::new();
+    for ch in clean.chars() {
+        clipped.push(ch);
+        if clipped.width() > columns - 1 {
+            clipped.pop();
+            break;
+        }
+    }
+    clipped.push('…');
+    clipped
 }
 
 /// Windows consoles ignore `\r` and erase sequences until virtual-terminal mode is on.

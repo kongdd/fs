@@ -31,9 +31,6 @@ shutil.copy2(root / "INSTALL.md", package / "README.md")
 shutil.copy2(root / "LICENSE", package / "LICENSE")
 example = "updatedb_win.toml" if system == "windows" else "updatedb_nas.toml"
 shutil.copy2(root / "config" / example, package / "config.toml.example")
-if system != "windows":
-    for script in ("install.sh", "uninstall.sh"):
-        shutil.copy2(root / "dist" / script, package / script)
 
 if system == "windows":
     archive = args.out / f"{name}.zip"

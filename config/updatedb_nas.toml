@@ -35,6 +35,10 @@ exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini", ".directory"]
 
 [[index]]
+name = "github_ssd"
+root = "/volume2/GitHub"
+
+[[index]]
 name = "github"
 root = "/volume1/CMIP6/GitHub"
 # Relative paths are resolved against this index root.
@@ -47,10 +51,6 @@ exclude_paths = [
 name = "cmip6"
 root = "/volume1/CMIP6"
 exclude_paths = ["GitHub"]
-
-[[index]]
-name = "github_ssd"
-root = "/volume2/GitHub"
 
 [[index]]
 name = "cug-hydro"

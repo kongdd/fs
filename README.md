@@ -74,8 +74,9 @@ export FS_ENGINE=rust      # 仅对当前进程环境生效
 建库与查询可以使用不同配置：NAS 扫描文件并保存数据库，Mac 通过挂载目录读取数据库。
 
 ```sh
-# NAS 建库
-fs -c config/updatedb_nas.toml updatedb -j 8
+# NAS 建库（在仓库根目录运行）
+alias update_nas='fs -c config/updatedb_nas.toml updatedb -j 8'
+update_nas
 
 # Mac 本地建库，再联合查询 NAS 和本地索引
 fs -c config/updatedb_mac.toml updatedb -j 8

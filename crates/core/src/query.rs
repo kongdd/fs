@@ -3,26 +3,23 @@ use std::{ffi::OsString, path::PathBuf};
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct SearchOptions {
     /// Restrict search to named indexes. May be repeated.
-    #[arg(short = 'd', long = "index")]
+    #[arg(short = 'd', long = "index", value_name = "NAME")]
     pub indexes: Vec<String>,
-    /// Everything expression: spaces AND, | OR, ! NOT, <...> groups, ext: and path:.
-    #[arg(required = true)]
+    /// Everything expression: spaces AND, | OR, ! NOT, <...> groups, exts: and path:.
+    #[arg(required = true, value_name = "EXPR")]
     pub patterns: Vec<OsString>,
-    /// Match without ASCII/locale case sensitivity.
-    #[arg(short = 'i', long)]
+    /// Internal backend matching mode; the CLI uses case_sensitive.
+    #[arg(skip)]
     pub ignore_case: bool,
-    /// Match filenames only, ignoring directory names.
-    #[arg(short = 'b', long)]
+    /// Internal backend scope; CLI searches use filenames unless include_path is set.
+    #[arg(skip)]
     pub basename: bool,
-    /// Match case (Everything searches ignore ASCII case by default).
-    #[arg(long, conflicts_with = "ignore_case")]
+    /// Match case (searches ignore ASCII case by default).
+    #[arg(short = 'C', long)]
     pub case_sensitive: bool,
-    /// Match terms against the full path instead of just the filename.
-    #[arg(short = 'p', long, conflicts_with = "basename")]
-    pub match_path: bool,
-    /// Use legacy locate semantics: case-sensitive full paths, no expression parser.
-    #[arg(long, conflicts_with_all = ["case_sensitive", "match_path"])]
-    pub locate: bool,
+    /// Include directory paths in matching, not just filenames.
+    #[arg(short = 'p', long)]
+    pub include_path: bool,
     /// Check that matches still exist (accesses the filesystem/NAS).
     #[arg(short = 'e', long)]
     pub existing: bool,
@@ -30,29 +27,31 @@ pub struct SearchOptions {
     #[arg(short = 'r', long)]
     pub regex: bool,
     /// Include only these extensions (ASCII case-insensitive). Repeat or use commas.
-    #[arg(long = "ext", value_delimiter = ',')]
+    #[arg(
+        long = "exts",
+        alias = "ext",
+        value_delimiter = ',',
+        value_name = "EXTS"
+    )]
     pub extensions: Vec<String>,
-    /// Only inferred directories: filenames without a nonempty extension (no filesystem access).
+    /// Infer directories from names without an extension; no metadata checks.
     #[arg(long, conflicts_with = "files")]
     pub dirs: bool,
-    /// Only inferred files: filenames with a nonempty extension (no filesystem access).
+    /// Infer files from names with an extension; no metadata checks.
     #[arg(long, conflicts_with = "dirs")]
     pub files: bool,
     /// Directory names from the query-time ignore sidecar, not indexing rules.
     #[arg(skip)]
     pub ignored_dirs: Vec<String>,
     /// Restrict results to this directory subtree, without accessing the filesystem.
-    #[arg(long)]
+    #[arg(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
     /// Skip this many matches after filtering.
-    #[arg(short = 'o', long, default_value_t = 0)]
+    #[arg(short = 'o', long, default_value_t = 0, value_name = "N")]
     pub offset: usize,
     /// Stop after this many matches after filtering and offset.
-    #[arg(short = 'n', long = "nlimit")]
+    #[arg(short = 'n', long = "nlimit", value_name = "N")]
     pub limit: Option<usize>,
-    /// Map NAS output paths to /mnt/{z,x,y,o} (CMIP6, GitHub, Researches, CUG-hydro).
-    #[arg(long)]
-    pub mnt: bool,
     /// Write a JSON array of paths.
     #[arg(long, conflicts_with = "null")]
     pub json: bool,

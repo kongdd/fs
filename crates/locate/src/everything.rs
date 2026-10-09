@@ -258,20 +258,23 @@ impl Parser<'_> {
     }
     fn term(&self, mut word: Vec<u8>, literal: bool) -> Result<Expr> {
         let mut regex = false;
-        let mut basename = !self.options.match_path
+        let mut basename = !self.options.include_path
             && !word
                 .iter()
                 .any(|&b| b == b'/' || (cfg!(windows) && b == b'\\'));
         if !literal {
-            if let Some(value) = word.strip_prefix(b"ext:") {
+            if let Some(value) = word
+                .strip_prefix(b"exts:")
+                .or_else(|| word.strip_prefix(b"ext:"))
+            {
                 let extensions = value
-                    .split(|b| *b == b';')
+                    .split(|b| matches!(b, b',' | b';'))
                     .map(|s| s.strip_prefix(b".").unwrap_or(s).to_vec())
                     .collect::<Vec<_>>();
                 if extensions.iter().any(|s| {
                     s.is_empty() || s.iter().any(|b| matches!(b, b'/' | b'\\' | b'*' | b'?'))
                 }) {
-                    bail!("ext: requires extensions separated by semicolons, e.g. ext:nc;tif");
+                    bail!("exts: requires comma-separated extensions, e.g. exts:docx,pdf");
                 }
                 return Ok(Expr::Extension(extensions));
             }
@@ -389,7 +392,6 @@ pub fn visit(
             basename,
             limit: None,
             offset: 0,
-            locate: false,
             ..options.clone()
         };
         visit_paths_until_filtered(

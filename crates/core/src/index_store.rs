@@ -50,7 +50,7 @@ pub fn validate(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Maps relative directory paths using the single stored root.
+/// Maps relative directory paths using the selected root.
 pub struct DirectoryPaths {
     root: Vec<u8>,
 }
@@ -217,8 +217,32 @@ pub fn visit_filtered(
     let mut connection = open_read(&idx.database)?;
     validate(&connection)?;
     let transaction = connection.transaction()?; // one consistent read snapshot
+    let stored = DirectoryPaths::load(&transaction)?;
+    let root = crate::platform::path_bytes(&idx.root).into_owned();
+    let relocated = root != stored.root;
+    let mut prefix = crate::platform::normalize(&root).into_owned();
+    if !prefix.ends_with(b"/") {
+        prefix.push(b'/');
+    }
+    let root_grams = self::grams(&prefix);
+    let boundary = prefix[prefix.len().saturating_sub(2)..]
+        .iter()
+        .fold(0_u32, |value, &byte| {
+            (value << 8) | u32::from(byte.to_ascii_lowercase())
+        });
+    let mut reader = BlockReader::new()?;
+    reader.paths.format = Some(DirectoryPaths::relative(root)?);
     let mut ranked = Vec::new();
     for &gram in grams {
+        // Relocated roots and their filename/directory boundaries are not
+        // represented by the original postings. Exact matching remains final.
+        if relocated
+            && (root_grams.binary_search(&gram).is_ok()
+                || gram >> 8 == boundary
+                || gram >> 16 == u32::from(b'/'))
+        {
+            continue;
+        }
         let n: Option<i64> = transaction
             .query_row("SELECT n FROM postings WHERE gram=?", [gram], |r| r.get(0))
             .optional()?;
@@ -253,7 +277,6 @@ pub fn visit_filtered(
         }
     }
     if let Some(ids) = candidates {
-        let mut reader = BlockReader::new()?;
         // Batch row lookups, keeping memory bounded and allowing limits to
         // stop after the first batch instead of materializing every path.
         let mut statement = transaction.prepare_cached(
@@ -277,7 +300,14 @@ pub fn visit_filtered(
             }
         }
     } else {
-        return scan::parallel(&transaction, basename, predicates, &mut visitor, workers);
+        return scan::parallel(
+            &transaction,
+            reader,
+            basename,
+            predicates,
+            &mut visitor,
+            workers,
+        );
     }
     Ok(true)
 }
@@ -291,7 +321,8 @@ pub fn directory_counts(
     let mut connection = open_read(&idx.database)?;
     validate(&connection)?;
     let transaction = connection.transaction()?;
-    let format = DirectoryPaths::load(&transaction)?;
+    DirectoryPaths::load(&transaction)?;
+    let format = DirectoryPaths::relative(crate::platform::path_bytes(&idx.root).into_owned())?;
     validate_root_record(&transaction)?;
     let mut statement = transaction.prepare(
         "SELECT d.path,SUM(b.n),MIN(b.n),MAX(b.n),MIN(b.size),MAX(b.size)

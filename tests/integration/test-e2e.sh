@@ -37,7 +37,7 @@ database = "$ROOT/archive.db"
 exclude_paths = ["cache with spaces"]
 EOF2
 
-# This suite exercises plocate and legacy locate semantics; Everything has its own suite.
+# This suite exercises plocate with full-path matching; Everything has its own suite.
 REAL_BIN=$(readlink -f "${1:-target/release/fs}")
 mkdir -p "$HOME/.cache"
 WRAPPER_DIR=$(mktemp -d "$HOME/.cache/fs-legacy.XXXXXX")
@@ -54,12 +54,12 @@ for argument in "\$@"; do
             done
             exec "$REAL_BIN" "\$@" --engine plocate ;;
 
-        search|locate) exec "$REAL_BIN" "\${@:1:\$position}" search --locate "\${@:\$((position + 2))}" ;;
+        search|locate) exec "$REAL_BIN" "\${@:1:\$position}" search -p "\${@:\$((position + 2))}" ;;
         doctor|stats|init) exec "$REAL_BIN" "\$@" ;;
     esac
     position=\$((position + 1))
 done
-exec "$REAL_BIN" "\$@" --locate
+exec "$REAL_BIN" "\$@" -p
 EOF_WRAPPER
 chmod +x "$BIN"
 "$BIN" --config "$ROOT/config.toml" doctor
@@ -161,7 +161,7 @@ with tempfile.TemporaryDirectory(prefix='fs-progress-', dir=cache) as temporary:
             os.close(slave)
 
 assert json.loads(search("--json", "nothing_matches_123")) == []
-assert run("-i", "SOIL").stdout == search("-i", "SOIL")
+assert run("SOIL").stdout == search("SOIL")
 implicit = run("--json", "-d", "research", "soil")
 assert implicit.returncode == 0 and json.loads(implicit.stdout) == json.loads(search("--json", "-d", "research", "soil"))
 assert search("ignore") == b""

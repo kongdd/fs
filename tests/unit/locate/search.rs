@@ -17,34 +17,6 @@ fn idx(name: &str, root: &str, exts: &[&str]) -> IndexConfig {
 }
 
 #[test]
-fn mount_mapping_is_byte_safe_and_respects_component_boundaries() {
-    for (path, expected) in [
-        (b"/volume1/CMIP6".as_slice(), b"/mnt/z".as_slice()),
-        (b"/volume1/CMIP6/project/a.nc", b"/mnt/z/project/a.nc"),
-        (b"/volume2/GitHub/repo/README", b"/mnt/x/repo/README"),
-        (b"/volume2/GitHub", b"/mnt/x"),
-        (b"/volume1/Researches", b"/mnt/y"),
-        (b"/volume1/Researches/project/a.nc", b"/mnt/y/project/a.nc"),
-        (b"/volume1/CUG-hydro/", b"/mnt/o/"),
-        (b"/volume1/CUG-hydro/project/a.nc", b"/mnt/o/project/a.nc"),
-        (b"/volume1/CMIP6/bad_\xff\n.nc", b"/mnt/z/bad_\xff\n.nc"),
-    ] {
-        assert_eq!(map_mount_path(path).unwrap(), expected);
-    }
-    for path in [
-        b"/volume1/CMIP6-other/a.nc".as_slice(),
-        b"/volume2/GitHubBackup/a.nc",
-        b"/volume1/Researches-other/a.nc",
-        b"/volume1/CUG-hydro-other/a.nc",
-        b"/other/volume1/CMIP6/a.nc",
-        b"/mnt/z/a.nc",
-        b"/volume1/cmip6/a.nc",
-    ] {
-        assert!(map_mount_path(path).is_none());
-    }
-}
-
-#[test]
 fn directory_name_ignore_matches_at_any_depth_with_exact_components() {
     let names = vec!["cache".into(), "node_modules".into(), ".cache".into()];
     for path in [

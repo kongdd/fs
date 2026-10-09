@@ -129,7 +129,7 @@ def main():
 
             def query(engine):
                 extra = ['-n', '50'] if label == 'limited' else []
-                sample, data = measure(commands[engine] + ['search', '--locate', '-b', '-0'] + extra + patterns)
+                sample, data = measure(commands[engine] + ['search', '-C', '-0'] + extra + patterns)
                 result = data.split(b'\0')[:-1]
                 found = set(result)
                 assert len(found) == len(result), (engine, label, 'duplicate results')

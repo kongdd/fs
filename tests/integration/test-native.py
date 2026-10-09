@@ -37,8 +37,6 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     def run(*args, ok=True):
         if args[0] in ('index', 'updatedb') and '--engine' not in args:
             args = (*args, '--engine', 'rust')
-        if args[0] == 'search':
-            args = ('search', '--locate', *args[1:])
         result = subprocess.run([binary, '-c', str(config), *args], capture_output=True, timeout=30)
         assert (result.returncode == 0) == ok, (args, result.stderr)
         return result
@@ -78,15 +76,15 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     run('doctor')
     assert b'0 dirs scanned' in run('index', 'update', '--no-progress').stderr
     assert b'already exist' in run('index', 'init').stderr
-    assert run('search', '-b', 'soil', '-0').stdout == encoded(root / 'soil_ERA5.nc') + b'\0'
-    assert len(run('search', '-b', '-i', 'soil', '-0').stdout.split(b'\0')[:-1]) == 2
+    assert run('search', '--case-sensitive', 'soil', '-0').stdout == encoded(root / 'soil_ERA5.nc') + b'\0'
+    assert len(run('search', 'soil', '-0').stdout.split(b'\0')[:-1]) == 2
     assert run('search', '-r', 'soil_.*[.]nc$', '-0').stdout == encoded(root / 'soil_ERA5.nc') + b'\0'
     assert run('search', '--ext', '.NC', '--path', str(root / 'nested'), '-0', '*').stdout == encoded(root / 'nested/rain.nc') + b'\0'
     assert run('search', '-0', 'bad').stdout == invalid + b'\0'
     assert run('search', '-0', 'ignore').stdout == b''
     assert run('search', '-0', 'hidden').stdout == b''
     assert run('search', '--json', 'nothing_matches').stdout == b'[]\n'
-    assert json.loads(run('search', '--json', 'soil').stdout) == [{'path': os.fsdecode(encoded(root / 'soil_ERA5.nc'))}]
+    assert json.loads(run('search', '--json', '--case-sensitive', 'soil').stdout) == [{'path': os.fsdecode(encoded(root / 'soil_ERA5.nc'))}]
     assert run('search', '-0', 'soil', 'nc').stdout == encoded(root / 'soil_ERA5.nc') + b'\0'
     # Default Everything syntax shares exact matching with the native planner.
     assert set(run('<soil | rain> ext:nc', '-0').stdout.split(b'\0')[:-1]) == {

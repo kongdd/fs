@@ -33,8 +33,6 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
         bail!("--json and --null cannot be used together");
     }
     let mut write_path = |path: &[u8]| {
-        let mapped = options.mnt.then(|| map_mount_path(path)).flatten();
-        let path = mapped.as_deref().unwrap_or(path);
         if options.json {
             output.write_all(if written == 0 { b"[" } else { b"," })?;
             let path = String::from_utf8_lossy(path);
@@ -46,12 +44,10 @@ pub fn search(cfg: &Config, options: &SearchOptions) -> Result<()> {
         written += 1;
         Ok(())
     };
-    if options.locate {
-        visit_paths(cfg, options, &mut write_path)?;
-    } else if options.regex {
+    if options.regex {
         let effective = SearchOptions {
             ignore_case: !options.case_sensitive,
-            basename: !options.match_path,
+            basename: !options.include_path,
             ..options.clone()
         };
         visit_paths(cfg, &effective, &mut write_path)?;
@@ -114,7 +110,7 @@ pub(crate) fn visit_paths_until_filtered(
         .iter()
         .any(|ext| ext.trim_start_matches('.').is_empty() || ext.contains(['/', '\\']))
     {
-        bail!("--ext must contain nonempty extensions, not paths");
+        bail!("--exts must contain nonempty extensions, not paths");
     }
     let indexes = cfg.select(&options.indexes)?;
     for idx in &indexes {
@@ -195,7 +191,7 @@ fn visit_plocate(
 
     let mut cmd = Command::new(&cfg.tools.plocate);
     cmd.env_remove("LOCATE_PATH");
-    if options.ignore_case && !options.locate {
+    if options.ignore_case {
         cmd.env("LC_ALL", "C");
     }
     for idx in indexes {
@@ -352,22 +348,6 @@ fn is_ignored_dir(path: &[u8], names: &[String]) -> Result<bool> {
     Ok(path.components().any(|part| {
         matches!(part, Component::Normal(name) if names.iter().any(|blocked| name.as_encoded_bytes() == blocked.as_bytes()))
     }))
-}
-
-fn map_mount_path(path: &[u8]) -> Option<Vec<u8>> {
-    for (source, target) in [
-        (b"/volume1/CMIP6".as_slice(), b"/mnt/z".as_slice()),
-        (b"/volume2/GitHub", b"/mnt/x"),
-        (b"/volume1/Researches", b"/mnt/y"),
-        (b"/volume1/CUG-hydro", b"/mnt/o"),
-    ] {
-        if let Some(rest) = path.strip_prefix(source)
-            && (rest.is_empty() || rest.starts_with(b"/"))
-        {
-            return Some([target, rest].concat());
-        }
-    }
-    None
 }
 
 fn matches_selection(path: &[u8], scope: Option<&Path>, extensions: &[String]) -> Result<bool> {

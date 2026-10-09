@@ -23,7 +23,7 @@ use search::SearchOptions;
 )]
 struct Cli {
     /// Config file. Overrides FS_CONFIG, `fs config set`, and the default config.
-    #[arg(short = 'c', long, global = true)]
+    #[arg(short = 'c', long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -74,8 +74,21 @@ enum Commands {
         action: ConfigAction,
     },
 
-    /// Search one or more configured databases.
-    #[command(name = "locate", visible_alias = "search")]
+    /// Search indexes: filenames by default, ignoring ASCII case.
+    #[command(
+        name = "locate",
+        visible_alias = "search",
+        after_help = r#"Results are full paths resolved against each index's configured root.
+Words containing / and path: terms match full paths. Use -p for all terms.
+Quote expressions to prevent shell expansion. --files/--dirs infer types only.
+
+Examples:
+  fs locate 'Kong 2024 *.pdf'
+  fs locate '"Kong 2024" *.pdf'
+  fs locate '<soil | rain> exts:nc !backup'
+  fs locate -C -p Kong
+  fs locate --path /data --exts docx,pdf Kong"#
+    )]
     Search(SearchOptions),
 
     /// Rank directories by indexed-entry count without scanning the filesystem.

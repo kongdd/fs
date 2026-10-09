@@ -69,6 +69,27 @@ fn basename_pushdown_is_conservative_for_paths_and_not() {
 }
 
 #[test]
+fn exts_accepts_single_or_comma_separated_extensions() {
+    assert!(expr("exts:pdf").matches(b"/data/report.PDF"));
+    let q = expr("exts:docx,pdf");
+    for path in [b"/data/report.docx".as_slice(), b"/data/report.PDF"] {
+        assert!(q.matches(path));
+        assert!(q.may_match_basename(path.rsplit(|&b| b == b'/').next().unwrap()));
+    }
+    assert!(!q.matches(b"/data/report.pdf.bak"));
+    assert!(!q.matches(b"/data/report.txt"));
+    for text in ["exts:", "exts:,pdf", "exts:pdf,", "exts:pdf,,docx"] {
+        assert!(
+            parse(&SearchOptions {
+                patterns: vec![text.into()],
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn extension_candidates_are_sound() {
     let q = expr("ext:py;CSV;[ab];x");
     let branches = q.branches().unwrap();

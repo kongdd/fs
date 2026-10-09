@@ -78,6 +78,7 @@ struct FilteredBlock {
 
 pub(super) fn sequential(
     connection: &Connection,
+    mut reader: BlockReader,
     basename: bool,
     predicates: (&impl Fn(&[u8]) -> bool, &impl Fn(&[u8]) -> bool),
     visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
@@ -85,7 +86,6 @@ pub(super) fn sequential(
     let mut statement =
         connection.prepare("SELECT data,directory,size,n FROM blocks ORDER BY id")?;
     let mut rows = statement.query([])?;
-    let mut reader = BlockReader::new()?;
     while let Some(row) = rows.next()? {
         if !reader.visit_filtered(row, connection, basename, predicates, visitor)? {
             return Ok(false);
@@ -96,6 +96,7 @@ pub(super) fn sequential(
 
 pub(super) fn parallel(
     connection: &Connection,
+    mut reader: BlockReader,
     basename: bool,
     predicates: (
         &(impl Fn(&[u8]) -> bool + Sync),
@@ -106,12 +107,11 @@ pub(super) fn parallel(
 ) -> Result<bool> {
     let workers = workers.clamp(1, MAX_WORKERS);
     if workers == 1 {
-        return sequential(connection, basename, predicates, visitor);
+        return sequential(connection, reader, basename, predicates, visitor);
     }
     let mut statement =
         connection.prepare("SELECT data,directory,size,n FROM blocks ORDER BY id")?;
     let mut rows = statement.query([])?;
-    let mut reader = BlockReader::new()?;
     // Small indexes and queries that reach their limit early pay no thread or
     // blob-copy overhead. Do not COUNT(*) or pre-read the whole index.
     for _ in 0..WARMUP_BLOCKS {

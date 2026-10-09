@@ -49,9 +49,19 @@ for engine in engines:
         soil = ['soil.nc', 'SOIL.csv', 'soil_rain.nc', 'backup_soil.nc']
         check('soil', soil)
         check('soil', [name for name in soil if name != 'SOIL.csv'], '--case-sensitive')
+        check('SOIL', soil)
+        check('SOIL', ['SOIL.csv'], '--case-sensitive')
+        check('SOIL.csv', ['SOIL.csv'], '-p')
+        check('SOIL.csv', ['SOIL.csv'], '-p', '--case-sensitive')
+        check('^soil', ['soil.nc', 'SOIL.csv', 'soil_rain.nc'], '--regex')
+        check('^soil', [name for name in soil if name.startswith('soil')], '--regex', '--case-sensitive')
         check('<soil | rain> ext:nc !backup', ['soil.nc', 'rain.nc', 'soil_rain.nc'])
         check('soil ext:nc;csv !backup', ['soil.nc', 'SOIL.csv', 'soil_rain.nc'])
         check('soil | soil_rain', soil)
+        check('exts:py', ['script.PY', '.py'])
+        check('exts:py,x', ['script.PY', '.py', 'single.x'])
+        check('soil exts:nc,csv !backup', ['soil.nc', 'SOIL.csv', 'soil_rain.nc'])
+        check('*', ['script.PY', 'single.x'], '--exts', 'py,x')
         check('ext:py', ['script.PY', '.py'])
         check('ext:.PY', ['script.PY', '.py'], '--case-sensitive')
         check('ext:py;py;x', ['script.PY', '.py', 'single.x'])
@@ -82,7 +92,7 @@ for engine in engines:
         check('rain_folder/other', ['rain_folder/other.nc'])
         check('regex:"^soil[.]nc$"', ['soil.nc'])
         assert len(paths('-p', 'soil')) > len(soil)
-        assert len(paths('--locate', 'soil')) > len(soil)
+        assert len(paths('--include-path', 'soil')) > len(soil)
         assert paths('bad') == [invalid]
         assert run('search', '--json', 'nothing_matches').stdout == b'[]\n'
         whole = paths('soil | rain')

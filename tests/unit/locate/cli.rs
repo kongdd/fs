@@ -46,6 +46,85 @@ fn updatedb_and_locate_are_canonical_commands() {
 }
 
 #[test]
+fn case_sensitive_is_the_only_cli_case_switch() {
+    for mode in [vec![], vec!["--regex"]] {
+        for flag in [None, Some("-C"), Some("--case-sensitive")] {
+            let mut args = vec!["fs", "locate"];
+            args.extend(&mode);
+            args.extend(flag);
+            args.push("soil");
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(cli.command, Commands::Search(options) if options.case_sensitive == flag.is_some())
+            );
+        }
+    }
+    for flag in ["-i", "--ignore-case"] {
+        assert!(Cli::try_parse_from(["fs", "locate", flag, "soil"]).is_err());
+    }
+}
+
+#[test]
+fn search_help_documents_defaults_and_examples() {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    let help = command
+        .find_subcommand_mut("locate")
+        .unwrap()
+        .render_help()
+        .to_string();
+    for text in [
+        "filenames by default",
+        "ignoring ASCII case",
+        "Results are full paths",
+        "<NAME>",
+        "<EXTS>",
+        "<N>",
+        "Kong 2024",
+        "infer types",
+    ] {
+        assert!(help.contains(text), "{help}");
+    }
+    for flag in ["--locate", "--basename", "--ignore-case", "--mnt"] {
+        assert!(!help.contains(flag), "{help}");
+        assert!(Cli::try_parse_from(["fs", "locate", flag, "soil"]).is_err());
+    }
+}
+
+#[test]
+fn redundant_basename_flags_are_rejected() {
+    for flag in ["-b", "--basename"] {
+        for mode in [vec![], vec!["-p"]] {
+            let mut args = vec!["fs", "locate"];
+            args.extend(mode);
+            args.extend([flag, "soil"]);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+    for flag in ["-p", "--include-path"] {
+        let cli = Cli::try_parse_from(["fs", "locate", flag, "soil"]).unwrap();
+        assert!(matches!(cli.command, Commands::Search(options) if options.include_path));
+    }
+    assert!(Cli::try_parse_from(["fs", "locate", "--match-path", "soil"]).is_err());
+}
+
+#[test]
+fn locate_accepts_exts() {
+    for flag in ["--exts", "--ext"] {
+        for (value, expected) in [("pdf", vec!["pdf"]), ("docx,pdf", vec!["docx", "pdf"])] {
+            let cli = Cli::try_parse_from(["fs", "locate", flag, value, "*"]).unwrap();
+            assert!(
+                matches!(cli.command, Commands::Search(options) if options.extensions == expected)
+            );
+        }
+    }
+    let cli =
+        Cli::try_parse_from(["fs", "locate", "--exts", "docx", "--exts", "pdf", "*"]).unwrap();
+    assert!(
+        matches!(cli.command, Commands::Search(options) if options.extensions == ["docx", "pdf"])
+    );
+}
+
+#[test]
 fn locate_accepts_nlimit() {
     for command in ["locate", "search"] {
         for options in [vec!["--nlimit", "20"], vec!["-n", "20"], vec!["-n20"]] {
@@ -301,15 +380,14 @@ fn ignore_commands_are_not_implicit_searches() {
 }
 
 #[test]
-fn implicit_search_accepts_mount_mapping() {
-    let cli = Cli::try_parse_from(normalize_implicit_search(
-        ["fs", "--mnt", "--files", "soil"]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-    ))
-    .unwrap();
-    assert!(matches!(cli.command, Commands::Search(options) if options.mnt && options.files));
+fn removed_mount_mapping_flag_is_rejected() {
+    for args in [
+        vec!["fs", "locate", "--mnt", "soil"],
+        vec!["fs", "--mnt", "soil"],
+    ] {
+        let args = normalize_implicit_search(args.into_iter().map(OsString::from).collect());
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
@@ -329,7 +407,8 @@ fn search_kind_flags_are_mutually_exclusive() {
 #[test]
 fn implicit_search_accepts_options() {
     for options in [
-        vec!["-i", "soil"],
+        vec!["--case-sensitive", "soil"],
+        vec!["-C", "soil"],
         vec!["--json", "-d", "research", "soil"],
         vec!["--", "--version"],
     ] {

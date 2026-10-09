@@ -75,7 +75,7 @@ impl Drop for Fixture {
 
 #[cfg(unix)]
 #[test]
-fn split_configs_use_matching_roots_and_databases() {
+fn split_configs_use_matching_databases_with_local_roots() {
     let load = |name| {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("config")
@@ -88,17 +88,74 @@ fn split_configs_use_matching_roots_and_databases() {
     assert_eq!(nas.engine.as_deref(), Some("rust"));
     assert_eq!(mac.engine.as_deref(), Some("rust"));
     assert!(search.engine.is_none());
-    assert_eq!(search.index.len(), nas.index.len() + mac.index.len());
-    for idx in nas.index.iter().chain(&mac.index) {
-        let selected = search.select(std::slice::from_ref(&idx.name)).unwrap();
-        assert_eq!(selected[0].root, idx.root);
+    for selected in &search.index {
+        let idx = nas
+            .index
+            .iter()
+            .chain(&mac.index)
+            .find(|idx| idx.name == selected.name)
+            .unwrap();
+        assert!(selected.root.is_absolute());
         let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume2") {
             PathBuf::from("/mnt/x").join(relative)
         } else {
             idx.update_database().to_path_buf()
         };
-        assert_eq!(selected[0].search_database(), database);
+        assert_eq!(selected.search_database(), database);
     }
+}
+
+#[test]
+fn queries_resolve_relative_paths_against_configured_root() {
+    let mut fixture = Fixture::new();
+    let original = fixture.cfg.index[0].root.clone();
+    let local = fixture.base.join("local-MounT");
+    fs::rename(&original, &local).unwrap();
+    fixture.cfg.index[0].root = local.clone();
+    let expected = path_bytes(&local.join("nested/rain.nc")).into_owned();
+    for pattern in [
+        "rain.nc".to_owned(),
+        local.join("nested/rain.nc").to_string_lossy().into_owned(),
+    ] {
+        assert_eq!(
+            fixture.paths(SearchOptions {
+                patterns: vec![pattern.into()],
+                existing: true,
+                path: Some(local.join("nested")),
+                ..Default::default()
+            }),
+            vec![expected.clone()]
+        );
+    }
+    assert!(
+        fixture
+            .paths(SearchOptions {
+                patterns: vec!["*".into()],
+                path: Some(original),
+                ..Default::default()
+            })
+            .is_empty()
+    );
+    let paths = fixture.query("*");
+    assert!(paths.contains(&path_bytes(&local).into_owned()));
+    assert!(
+        paths
+            .iter()
+            .all(|path| path.starts_with(path_bytes(&local).as_ref()))
+    );
+    fixture.cfg.index[0]
+        .filters
+        .exclude_paths
+        .push("nested".into());
+    assert!(fixture.query("rain.nc").is_empty());
+    let mut counts = Vec::new();
+    let root = index_search::directory_counts(&fixture.cfg.index[0], |path, _| {
+        counts.push(path.to_vec());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(root, path_bytes(&local).as_ref());
+    assert!(counts.iter().all(|path| path.starts_with(&root)));
 }
 
 #[test]

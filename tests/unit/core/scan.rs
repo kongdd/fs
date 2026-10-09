@@ -48,6 +48,7 @@ fn run(
 ) -> Result<bool> {
     parallel(
         connection,
+        BlockReader::new().unwrap(),
         true,
         (&matches, &|_| true),
         &mut visitor,
@@ -65,6 +66,7 @@ fn collect(connection: &Connection, basename: bool, workers: usize, filter: bool
     };
     let complete = parallel(
         connection,
+        BlockReader::new().unwrap(),
         basename,
         (&matches, &name_matches),
         &mut visitor,
@@ -100,6 +102,7 @@ fn parallel_matches_serial_in_order_with_raw_bytes_and_path_predicates() {
         };
         parallel(
             &connection,
+            BlockReader::new().unwrap(),
             false,
             (&matches, &|_| true),
             &mut visitor,
@@ -109,6 +112,36 @@ fn parallel_matches_serial_in_order_with_raw_bytes_and_path_predicates() {
     }
     assert_eq!(actual, expected);
     assert_eq!(actual.len(), 900);
+}
+
+#[test]
+fn configured_root_is_used_by_serial_and_parallel_scans() {
+    let connection = fixture();
+    for workers in [1, 4] {
+        let mut reader = BlockReader::new().unwrap();
+        reader.paths.format =
+            Some(super::super::DirectoryPaths::relative(b"/local/mount".to_vec()).unwrap());
+        let mut found = Vec::new();
+        parallel(
+            &connection,
+            reader,
+            false,
+            (&|_| true, &|_| true),
+            &mut |path| {
+                found.push(path.to_vec());
+                Ok(true)
+            },
+            workers,
+        )
+        .unwrap();
+        assert_eq!(found[0], b"/local/mount");
+        assert_eq!(found.len(), 2701);
+        assert!(
+            found[1..]
+                .iter()
+                .all(|path| path.starts_with(b"/local/mount/"))
+        );
+    }
 }
 
 #[test]
@@ -263,6 +296,7 @@ fn workers_reject_corruption_even_when_predicates_never_match() {
         connection.execute_batch(sql).unwrap();
         let result = parallel(
             &connection,
+            BlockReader::new().unwrap(),
             true,
             (&|_| false, &|_| false),
             &mut |_| unreachable!(),

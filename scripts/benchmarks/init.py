@@ -95,7 +95,7 @@ def main():
                 assert len(found) == len(expected) and set(found) == expected, (label, trial, 'incorrect full result set')
                 # Compare selective candidate results, not just the scan fallback.
                 for pattern in ['0000123', 'soil', 'does_not_exist_xyz']:
-                    actual = subprocess.check_output(command + ['search', '-b', '-0', pattern]).split(b'\0')[:-1]
+                    actual = subprocess.check_output(command + ['search', '-0', pattern]).split(b'\0')[:-1]
                     oracle = {path for path in expected if pattern.encode().lower() in path.rsplit(b'/', 1)[-1].lower()}
                     assert len(actual) == len(oracle) and set(actual) == oracle, (label, trial, pattern)
                 sample.update({'trial': trial, 'index_bytes': database.stat().st_size})

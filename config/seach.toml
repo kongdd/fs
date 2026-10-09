@@ -1,36 +1,41 @@
-# Mac query: fs -c config/seach.toml locate --mnt soil
+# Mac query: fs -c config/seach.toml locate soil
 # Query only: use updatedb_nas.toml / updatedb_mac.toml for indexing.
 # Database formats are detected from their headers; no engine setting is needed.
 # Mount NAS /volume1/CMIP6 at /mnt/z before querying.
-# Keep each root identical to the indexed root, not its local mount point.
-# --mnt maps result paths to /mnt/z, /mnt/x, /mnt/y and /mnt/o.
-
-[[index]]
-name = "github"
-root = "/volume1/CMIP6/GitHub"
-database = "/mnt/x/config/fs/github.db"
+# For Rust indexes, set each root to this computer's local mount point.
+# Relative index paths are resolved against this root.
 
 [[index]]
 name = "cmip6"
-root = "/volume1/CMIP6"
+# root = "/volume1/CMIP6"
+root = "/mnt/z"
 database = "/mnt/x/config/fs/cmip6.db"
 
 [[index]]
+name = "github"
+root = "/mnt/z/GitHub"
+# root = "/volume1/CMIP6/GitHub"
+database = "/mnt/x/config/fs/github.db"
+
+[[index]]
 name = "github_ssd"
-root = "/volume2/GitHub"
+# root = "/volume2/GitHub"
+root = "/mnt/x"
 database = "/mnt/x/config/fs/github_ssd.db"
 
 [[index]]
-name = "cug-hydro"
-root = "/volume1/CUG-hydro"
-database = "/mnt/x/config/fs/cug-hydro.db"
-
-[[index]]
 name = "researches"
-root = "/volume1/Researches"
+# root = "/volume1/Researches"
+root = "/mnt/y"
 database = "/mnt/x/config/fs/researches.db"
 
 [[index]]
-name = "mac"
-root = "/Users/kongdd"
-database = "/Users/kongdd/.config/fs/mac.db"
+name = "cug-hydro"
+# root = "/volume1/CUG-hydro"
+root = "/mnt/o"
+database = "/mnt/x/config/fs/cug-hydro.db"
+
+# [[index]]
+# name = "mac"
+# root = "/Users/kongdd"
+# database = "/Users/kongdd/.config/fs/mac.db"

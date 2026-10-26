@@ -372,6 +372,98 @@ fn exclusions_rebuild_when_changed_and_do_not_follow_symlinks() {
 }
 
 #[test]
+fn added_directory_exclusions_prune_stored_subtrees_and_only_rescan_parents() {
+    for jobs in [1, 4] {
+        let mut fixture = Fixture::new();
+        for name in ["raw/deep/raw", "kept/deep", "raw-other"] {
+            fs::create_dir_all(fixture.idx.root.join(name)).unwrap();
+            fs::write(fixture.idx.root.join(name).join("shared.nc"), b"").unwrap();
+        }
+        // A file with the excluded basename must remain indexed.
+        fs::write(fixture.idx.root.join("kept/raw"), b"").unwrap();
+        update(&fixture.idx, None, false).unwrap();
+        let connection = Connection::open(&fixture.idx.database).unwrap();
+        let kept_blocks = || {
+            connection
+                .prepare(
+                    "SELECT b.id,b.data FROM blocks b JOIN directories d ON d.id=b.directory
+                 WHERE d.path=x'6b657074' ORDER BY b.id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = kept_blocks();
+        assert!(!before.is_empty());
+        fixture.idx.filters.exclude_dirs.push("raw".into());
+        let report = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(report.scanned, 1, "only root contains an excluded child");
+        assert_eq!(report.reused, 3);
+        assert_eq!(
+            kept_blocks(),
+            before,
+            "unaffected blocks must not be rewritten"
+        );
+        assert_eq!(fixture.query(&["shared.nc"], true, false, false).len(), 2);
+        assert_eq!(fixture.query(&["raw"], true, false, false).len(), 2);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM directories", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        let all_blocks = connection
+            .prepare("SELECT id FROM blocks")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0).map(|id| id as u64))
+            .unwrap()
+            .collect::<rusqlite::Result<HashSet<_>>>()
+            .unwrap();
+        let mut statement = connection.prepare("SELECT data,n FROM postings").unwrap();
+        for row in statement
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)? as usize))
+            })
+            .unwrap()
+        {
+            let (data, n) = row.unwrap();
+            let ids = unpack(&data).unwrap();
+            assert_eq!(ids.len(), n);
+            assert!(ids.iter().all(|id| all_blocks.contains(id)));
+        }
+        let before_noop = fs::read(&fixture.idx.database).unwrap();
+        assert_eq!(
+            update_with_jobs(&fixture.idx, None, false, jobs)
+                .unwrap()
+                .scanned,
+            0
+        );
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), before_noop);
+        // Removing an exclusion must discover previously omitted descendants.
+        fixture.idx.filters.exclude_dirs.clear();
+        update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(fixture.query(&["shared.nc"], true, false, false).len(), 3);
+    }
+}
+
+#[test]
+fn added_nonexistent_directory_exclusion_does_not_rescan() {
+    let mut fixture = Fixture::new();
+    fs::write(fixture.idx.root.join("kept.nc"), b"").unwrap();
+    update(&fixture.idx, None, false).unwrap();
+    fixture.idx.filters.exclude_dirs.push("not-present".into());
+    assert_eq!(update(&fixture.idx, None, false).unwrap().scanned, 0);
+    let before = fs::read(&fixture.idx.database).unwrap();
+    assert_eq!(update(&fixture.idx, None, false).unwrap().scanned, 0);
+    assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+}
+
+#[test]
 fn partial_update_preserves_other_subtrees_and_rollback_preserves_old_index() {
     let fixture = Fixture::new();
     for name in ["left", "right"] {

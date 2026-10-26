@@ -1,10 +1,13 @@
-//! In-memory directory snapshot for updates; no filenames or postings are loaded.
-use std::{collections::HashMap, ffi::OsString};
+//! Directory snapshots and filter pruning; postings are streamed only when pruning.
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::os_string;
+use super::{os_string, pack, unpack};
 
 pub(super) struct StoredDirectory {
     pub id: i64,
@@ -18,6 +21,79 @@ pub(super) struct DirectorySnapshot {
 }
 
 impl DirectorySnapshot {
+    /// Apply added directory-name exclusions to the stored tree, without
+    /// visiting excluded subtrees. Rewrite each affected global posting once,
+    /// not once per removed directory. Only surviving parents need a readdir
+    /// to remove excluded child markers from their own filename blocks.
+    pub fn prune_ignored(
+        &mut self,
+        connection: &Connection,
+        names: &HashSet<OsString>,
+    ) -> Result<HashSet<i64>> {
+        let names_bytes: HashSet<_> = names.iter().map(|name| name.as_encoded_bytes()).collect();
+        let mut removed = Vec::new();
+        self.directories.retain(|path, directory| {
+            let ignored = !path.is_empty()
+                && path
+                    .split(|&byte| byte == b'/')
+                    .any(|part| names_bytes.contains(part));
+            if ignored {
+                removed.push(directory.id);
+            }
+            !ignored
+        });
+        let parents = self
+            .directories
+            .values()
+            .filter(|directory| directory.children.iter().any(|name| names.contains(name)))
+            .map(|directory| directory.id)
+            .collect();
+        if removed.is_empty() {
+            return Ok(parents);
+        }
+        connection
+            .execute_batch("CREATE TEMP TABLE ignored_directories(id INTEGER PRIMARY KEY);")?;
+        {
+            let mut insert =
+                connection.prepare("INSERT INTO temp.ignored_directories VALUES (?)")?;
+            for id in removed {
+                insert.execute([id])?;
+            }
+        }
+        let blocks = connection.prepare(
+            "SELECT id FROM blocks WHERE directory IN (SELECT id FROM temp.ignored_directories)",
+        )?.query_map([], |row| row.get::<_, i64>(0).map(|id| id as u64))?
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
+        if !blocks.is_empty() {
+            let mut select = connection.prepare("SELECT gram,data FROM postings ORDER BY gram")?;
+            let mut rows = select.query([])?;
+            let mut update = connection.prepare("UPDATE postings SET data=?,n=? WHERE gram=?")?;
+            let mut delete = connection.prepare("DELETE FROM postings WHERE gram=?")?;
+            while let Some(row) = rows.next()? {
+                let gram: i64 = row.get(0)?;
+                let mut ids = unpack(row.get_ref(1)?.as_blob()?)?;
+                let before = ids.len();
+                ids.retain(|id| !blocks.contains(id));
+                if ids.len() == before {
+                    continue;
+                }
+                if ids.is_empty() {
+                    delete.execute([gram])?;
+                } else {
+                    update.execute(params![pack(&ids), ids.len() as i64, gram])?;
+                }
+            }
+        }
+        connection.execute_batch(
+            "DELETE FROM blocks WHERE directory IN (SELECT id FROM temp.ignored_directories);
+             DELETE FROM children WHERE directory IN (SELECT id FROM temp.ignored_directories);
+             DELETE FROM directory_grams WHERE directory IN (SELECT id FROM temp.ignored_directories);
+             DELETE FROM directories WHERE id IN (SELECT id FROM temp.ignored_directories);
+             DROP TABLE temp.ignored_directories;",
+        )?;
+        Ok(parents)
+    }
+
     pub fn load(connection: &Connection, mut scope: &[u8]) -> Result<Self> {
         while let Some(parent) = scope.strip_suffix(b"/") {
             scope = parent;

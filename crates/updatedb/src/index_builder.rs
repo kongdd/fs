@@ -83,6 +83,20 @@ fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
     ))?)
 }
 
+// A stricter directory-name filter can be applied to the stored tree. Removing
+// an exclusion still needs discovery: ignored children were never stored.
+fn only_adds_directory_exclusions(old: Option<&[u8]>, new: &[u8]) -> bool {
+    type Key = (Vec<String>, Vec<Vec<u8>>);
+    let Some((old_names, old_paths)) = old.and_then(|key| serde_json::from_slice::<Key>(key).ok())
+    else {
+        return false;
+    };
+    let Ok((new_names, new_paths)) = serde_json::from_slice::<Key>(new) else {
+        return false;
+    };
+    old_paths == new_paths && old_names.iter().all(|name| new_names.contains(name))
+}
+
 #[derive(Clone)]
 struct ScanRules {
     directories: HashSet<std::ffi::OsString>,
@@ -847,17 +861,25 @@ pub fn update_with_exclusions(
     if scope.is_some() && old_key.as_ref() != Some(&key) {
         bail!("root or directory exclusions changed; run a full index update before --folder");
     }
-    let force = old_key.as_ref() != Some(&key);
+    let filters_changed = old_key.as_ref() != Some(&key);
+    let added_exclusions =
+        filters_changed && only_adds_directory_exclusions(old_key.as_deref(), &key);
+    let force = filters_changed && !added_exclusions;
     let scan_root = scope.unwrap_or(&idx.root);
     let stored_scope = paths.encode(scan_root)?;
     let snapshot_start = Instant::now();
-    let snapshot = if existing {
+    let mut snapshot = if existing {
         incremental::DirectorySnapshot::load(&transaction, &stored_scope)?
     } else {
         incremental::DirectorySnapshot::default()
     };
-    let snapshot_elapsed = snapshot_start.elapsed();
     let rules = ScanRules::with_exclusions(idx, extra_exclusions);
+    let refilter = if added_exclusions {
+        snapshot.prune_ignored(&transaction, &rules.directories)?
+    } else {
+        HashSet::new()
+    };
+    let snapshot_elapsed = snapshot_start.elapsed();
     let mut scanner = if existing {
         None
     } else {
@@ -985,7 +1007,10 @@ pub fn update_with_exclusions(
         if existing {
             visited.insert(id);
         }
-        if !force && previous.is_some_and(|previous| stamp_matches(&previous.stamp, &before)) {
+        if !force
+            && !refilter.contains(&id)
+            && previous.is_some_and(|previous| stamp_matches(&previous.stamp, &before))
+        {
             let previous = previous.expect("reused directory has a stored stamp");
             pending.extend(
                 previous
@@ -1182,7 +1207,7 @@ pub fn update_with_exclusions(
     }
     let finalize_start = Instant::now();
     let unchanged = existing
-        && !force
+        && !filters_changed
         && report.scanned == 0
         && new_directories.is_empty()
         && visited.len() == snapshot.directories.len();
@@ -1212,7 +1237,7 @@ pub fn update_with_exclusions(
         if !existing {
             gram_codec.finish_fresh(&transaction)?;
         }
-        if force {
+        if filters_changed {
             transaction.execute("INSERT INTO meta(key,value) VALUES ('filters',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&key])?;
         }
     }

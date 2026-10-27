@@ -32,6 +32,7 @@ impl DirectorySnapshot {
     ) -> Result<HashSet<i64>> {
         let names_bytes: HashSet<_> = names.iter().map(|name| name.as_encoded_bytes()).collect();
         let mut removed = Vec::new();
+        let mut parents = HashSet::new();
         self.directories.retain(|path, directory| {
             let ignored = !path.is_empty()
                 && path
@@ -39,15 +40,11 @@ impl DirectorySnapshot {
                     .any(|part| names_bytes.contains(part));
             if ignored {
                 removed.push(directory.id);
+            } else if directory.children.iter().any(|name| names.contains(name)) {
+                parents.insert(directory.id);
             }
             !ignored
         });
-        let parents = self
-            .directories
-            .values()
-            .filter(|directory| directory.children.iter().any(|name| names.contains(name)))
-            .map(|directory| directory.id)
-            .collect();
         if removed.is_empty() {
             return Ok(parents);
         }

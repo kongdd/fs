@@ -372,6 +372,35 @@ fn exclusions_rebuild_when_changed_and_do_not_follow_symlinks() {
 }
 
 #[test]
+fn added_directory_exclusions_require_unchanged_paths_and_preserved_names() {
+    let mut fixture = Fixture::new();
+    fixture.idx.filters.exclude_dirs = vec!["old".into()];
+    fixture.idx.filters.exclude_paths = vec!["cache".into(), "中文".into()];
+    let old = filter_key(&fixture.idx).unwrap();
+    for (names, paths, expected) in [
+        (vec!["old"], vec!["cache", "中文"], true),
+        (vec!["new", "old"], vec!["cache", "中文"], true),
+        (vec!["new"], vec!["cache", "中文"], false),
+        (vec!["old"], vec!["中文", "cache"], false),
+        (vec!["old"], vec!["cache", "other"], false),
+        (vec!["old"], vec!["cache"], false),
+        (vec!["old"], vec!["cache", "中文", "other"], false),
+    ] {
+        fixture.idx.filters.exclude_dirs = names.into_iter().map(String::from).collect();
+        fixture.idx.filters.exclude_paths = paths.into_iter().map(PathBuf::from).collect();
+        assert_eq!(
+            only_adds_directory_exclusions(Some(&old), &fixture.idx),
+            expected
+        );
+    }
+    assert!(!only_adds_directory_exclusions(None, &fixture.idx));
+    assert!(!only_adds_directory_exclusions(
+        Some(b"invalid"),
+        &fixture.idx
+    ));
+}
+
+#[test]
 fn added_directory_exclusions_prune_stored_subtrees_and_only_rescan_parents() {
     for jobs in [1, 4] {
         let mut fixture = Fixture::new();

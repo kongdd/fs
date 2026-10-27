@@ -85,16 +85,20 @@ fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
 
 // A stricter directory-name filter can be applied to the stored tree. Removing
 // an exclusion still needs discovery: ignored children were never stored.
-fn only_adds_directory_exclusions(old: Option<&[u8]>, new: &[u8]) -> bool {
+fn only_adds_directory_exclusions(old: Option<&[u8]>, idx: &IndexConfig) -> bool {
     type Key = (Vec<String>, Vec<Vec<u8>>);
     let Some((old_names, old_paths)) = old.and_then(|key| serde_json::from_slice::<Key>(key).ok())
     else {
         return false;
     };
-    let Ok((new_names, new_paths)) = serde_json::from_slice::<Key>(new) else {
-        return false;
-    };
-    old_paths == new_paths && old_names.iter().all(|name| new_names.contains(name))
+    old_names
+        .iter()
+        .all(|name| idx.filters.exclude_dirs.contains(name))
+        && old_paths.len() == idx.filters.exclude_paths.len()
+        && old_paths
+            .iter()
+            .zip(&idx.filters.exclude_paths)
+            .all(|(old, new)| old.as_slice() == path_bytes(new).as_ref())
 }
 
 #[derive(Clone)]
@@ -128,14 +132,14 @@ impl ScanRules {
                         idx.root.join(path)
                     }
                 })
-                .chain(index_artifacts(&idx.database))
+                .chain(artifact_paths(&idx.database))
                 .chain(extra.iter().cloned())
                 .collect(),
         }
     }
 }
 
-fn index_artifacts(database: &Path) -> Vec<PathBuf> {
+pub(crate) fn artifact_paths(database: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for suffix in ["", "-journal", "-wal", "-shm", ".lock"] {
         let mut name = database.as_os_str().to_os_string();
@@ -154,7 +158,7 @@ fn index_artifacts(database: &Path) -> Vec<PathBuf> {
 }
 
 fn artifact_names_in(directory: &Path, database: &Path) -> HashSet<std::ffi::OsString> {
-    index_artifacts(database)
+    artifact_paths(database)
         .into_iter()
         .filter(|path| {
             path.parent()
@@ -162,10 +166,6 @@ fn artifact_names_in(directory: &Path, database: &Path) -> HashSet<std::ffi::OsS
         })
         .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
         .collect()
-}
-
-pub(crate) fn artifact_paths(database: &Path) -> Vec<PathBuf> {
-    index_artifacts(database)
 }
 
 fn read_children(directory: &Path) -> std::io::Result<Vec<(std::ffi::OsString, bool)>> {
@@ -863,7 +863,7 @@ pub fn update_with_exclusions(
     }
     let filters_changed = old_key.as_ref() != Some(&key);
     let added_exclusions =
-        filters_changed && only_adds_directory_exclusions(old_key.as_deref(), &key);
+        filters_changed && only_adds_directory_exclusions(old_key.as_deref(), idx);
     let force = filters_changed && !added_exclusions;
     let scan_root = scope.unwrap_or(&idx.root);
     let stored_scope = paths.encode(scan_root)?;

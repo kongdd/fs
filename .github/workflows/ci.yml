@@ -14,6 +14,9 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,7 +27,7 @@ jobs:
         run: cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: lcov.info
           disable_search: true
           fail_ci_if_error: true

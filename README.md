@@ -35,6 +35,8 @@ fs stats
 fs updatedb                          # 更新全部索引；缺失数据库自动初始化
 fs updatedb research                 # 只更新指定索引
 fs updatedb research github          # 更新多个索引
+fs updatedb update --index research,github  # 指定一个或多个索引
+fs updatedb index list               # 列出索引名称和根目录
 fs updatedb init                     # 只初始化缺失数据库，不改动已有库
 fs updatedb init research
 fs updatedb -j 8                     # Rust 引擎使用 8 个扫描线程

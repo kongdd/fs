@@ -46,6 +46,35 @@ fn updatedb_and_locate_are_canonical_commands() {
 }
 
 #[test]
+fn updatedb_index_list_is_a_command() {
+    let cli = parse_without_engine_env(&["fs", "updatedb", "index", "list"]);
+    assert!(matches!(
+        cli.command,
+        Commands::Index {
+            action: Some(IndexAction::Index {
+                action: IndexInfoAction::List
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn updatedb_update_accepts_index_options() {
+    for args in [
+        vec!["fs", "updatedb", "update", "--index", "a", "b"],
+        vec!["fs", "updatedb", "update", "--index", "a,b"],
+        vec!["fs", "updatedb", "update", "--index", "a", "--index", "b"],
+    ] {
+        let cli = parse_without_engine_env(&args);
+        assert!(matches!(cli.command, Commands::Index {
+            action: Some(IndexAction::Update { indexes, .. }), ..
+        } if indexes == ["a", "b"]));
+    }
+    assert!(Cli::try_parse_from(["fs", "updatedb", "update", "--index"]).is_err());
+}
+
+#[test]
 fn case_sensitive_is_the_only_cli_case_switch() {
     for mode in [vec![], vec!["--regex"]] {
         for flag in [None, Some("-C"), Some("--case-sensitive")] {
@@ -325,7 +354,7 @@ fn index_actions_accept_shared_options() {
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(matches!(cli.command, Commands::Index {
-            action: Some(IndexAction::Update { names }), no_progress: true, ..
+            action: Some(IndexAction::Update { names, .. }), no_progress: true, ..
         } if names == ["research"]));
     }
     let cli = Cli::try_parse_from(["fs", "index", "init"]).unwrap();

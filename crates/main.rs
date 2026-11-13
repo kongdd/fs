@@ -47,9 +47,10 @@ enum Commands {
         #[command(subcommand)]
         action: Option<IndexAction>,
         /// Index names. Omit to update all configured indexes.
+        #[arg(conflicts_with = "folders")]
         names: Vec<String>,
         /// Scan only this folder and merge its paths into the containing DB. May be repeated.
-        #[arg(long = "folder", global = true, conflicts_with = "names")]
+        #[arg(long = "folder", global = true)]
         folders: Vec<PathBuf>,
         /// Disable live progress (and legacy per-entry tracking).
         #[arg(long, global = true)]
@@ -201,9 +202,26 @@ fn resolve_engine(explicit: Option<IndexEngine>, configured: Option<&str>) -> Re
 #[derive(Subcommand, Debug)]
 enum IndexAction {
     /// Update existing databases and automatically initialize missing ones.
-    Update { names: Vec<String> },
+    Update {
+        #[arg(conflicts_with = "folders")]
+        names: Vec<String>,
+        /// Index names to update, separated by commas or spaces. May be repeated.
+        #[arg(long = "index", num_args = 1.., value_delimiter = ',', conflicts_with = "names")]
+        indexes: Vec<String>,
+    },
     /// Initialize missing databases only; leave existing databases unchanged.
     Init { names: Vec<String> },
+    /// Inspect configured indexes.
+    Index {
+        #[command(subcommand)]
+        action: IndexInfoAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IndexInfoAction {
+    /// List configured indexes.
+    List,
 }
 
 fn main() {
@@ -235,7 +253,29 @@ fn run() -> Result<()> {
                 bail!("put index names after update/init, not before it");
             }
             let names = match action {
-                Some(IndexAction::Update { names }) => names,
+                Some(IndexAction::Index {
+                    action: IndexInfoAction::List,
+                }) => {
+                    if !folders.is_empty() {
+                        bail!("index list cannot be combined with --folder");
+                    }
+                    let width = cfg
+                        .index
+                        .iter()
+                        .map(|index| index.name.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    for index in &cfg.index {
+                        println!("{:<width$} : {}", index.name, index.root.display());
+                    }
+                    return Ok(());
+                }
+                Some(IndexAction::Update { names, indexes }) => {
+                    if !folders.is_empty() && (!names.is_empty() || !indexes.is_empty()) {
+                        bail!("index names cannot be combined with --folder");
+                    }
+                    if indexes.is_empty() { names } else { indexes }
+                }
                 Some(IndexAction::Init { names }) => {
                     if !folders.is_empty() {
                         bail!("index init cannot be combined with --folder");
@@ -259,7 +299,12 @@ fn run() -> Result<()> {
                     }
                     missing
                 }
-                None => names,
+                None => {
+                    if !folders.is_empty() && !names.is_empty() {
+                        bail!("index names cannot be combined with --folder");
+                    }
+                    names
+                }
             };
             let engine = resolve_engine(engine, cfg.engine.as_deref())?;
             indexer::build_indexes(

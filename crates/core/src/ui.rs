@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 pub enum Tone {
     Info,
     Success,
+    Summary,
     Warning,
     Error,
 }
@@ -26,8 +27,9 @@ pub fn paint(text: &str, tone: Tone, color: bool) -> String {
         return text.into();
     }
     let code = match tone {
-        Tone::Info => "1;36",
-        Tone::Success => "1;32",
+        Tone::Info => "36",
+        Tone::Success => "32",
+        Tone::Summary => "1;32",
         Tone::Warning => "1;33",
         Tone::Error => "1;31",
     };

@@ -126,7 +126,10 @@ pub fn build_indexes(
         } else {
             let _lock = lock_database(&idx.database)?;
             let scope = idx.root.join(folder.strip_prefix(root)?);
-            crate::index_builder::update_with_jobs(idx, Some(&scope), progress, jobs.into())?;
+            let start = Instant::now();
+            let report =
+                crate::index_builder::update_with_jobs(idx, Some(&scope), progress, jobs.into())?;
+            report.log_timings(start.elapsed());
         }
     }
     Ok(())
@@ -203,15 +206,15 @@ fn build_one(idx: &IndexConfig, progress: bool, jobs: u16) -> Result<()> {
             idx.root.display()
         ),
     );
-    if idx.database.exists() {
-        crate::index_builder::update_with_jobs(idx, None, progress, jobs.into())?;
+    let report = if idx.database.exists() {
+        crate::index_builder::update_with_jobs(idx, None, progress, jobs.into())?
     } else {
         let workspace = Workspace::new(&idx.database)?;
         let mut temporary = idx.clone();
         temporary.database = workspace.0.join("index.db");
         // The lock file already sits beside the final database. Exclude it
         // without recording it in the stored user-filter key.
-        crate::index_builder::update_with_exclusions(
+        let report = crate::index_builder::update_with_exclusions(
             &temporary,
             None,
             progress,
@@ -223,10 +226,8 @@ fn build_one(idx: &IndexConfig, progress: bool, jobs: u16) -> Result<()> {
             .open(&temporary.database)?
             .sync_all()?;
         fs::rename(&temporary.database, &idx.database)?;
-    }
-    ui::log(
-        Tone::Success,
-        format_args!("done {} in {:.2}s", idx.name, start.elapsed().as_secs_f64()),
-    );
+        report
+    };
+    report.log_timings(start.elapsed());
     Ok(())
 }

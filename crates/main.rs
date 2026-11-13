@@ -7,6 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -227,6 +228,7 @@ fn run() -> Result<()> {
             jobs,
             engine,
         } => {
+            let started = Instant::now();
             let (cfg, _) = Config::load(cli.config.as_deref())?;
             let cfg = cfg.for_update();
             if action.is_some() && !names.is_empty() {
@@ -249,6 +251,10 @@ fn run() -> Result<()> {
                             ui::Tone::Warning,
                             format_args!("all selected databases already exist; use fs updatedb"),
                         );
+                        ui::log(
+                            ui::Tone::Summary,
+                            format_args!("total elapsed: {:.2}s", started.elapsed().as_secs_f64()),
+                        );
                         return Ok(());
                     }
                     missing
@@ -265,7 +271,12 @@ fn run() -> Result<()> {
                 jobs,
             )?;
             stats::refresh(&cfg, &names)
-                .context("index databases updated, but statistics refresh failed")
+                .context("index databases updated, but statistics refresh failed")?;
+            ui::log(
+                ui::Tone::Summary,
+                format_args!("total elapsed: {:.2}s", started.elapsed().as_secs_f64()),
+            );
+            Ok(())
         }
         Commands::Search(mut options) => {
             let (cfg, path) = Config::load(cli.config.as_deref())?;

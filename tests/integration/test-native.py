@@ -3,6 +3,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,19 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
             args = (*args, '--engine', 'rust')
         result = subprocess.run([binary, '-c', str(config), *args], capture_output=True, timeout=30)
         assert (result.returncode == 0) == ok, (args, result.stderr)
+        if ok and args[0] in ('index', 'updatedb'):
+            assert re.fullmatch(rb'total elapsed: \d+\.\d{2}s', result.stderr.splitlines()[-1]), result.stderr
+            assert b'\x1b[' not in result.stderr
+            phases = [line for line in result.stderr.splitlines() if line.startswith(b'    scan ')]
+            assert len(phases) == result.stderr.count(b'dirs scanned'), result.stderr
+            for line in phases:
+                assert re.fullmatch(
+                    r'    scan \d+\.\d{3}s · index \d+\.\d{3}s · '
+                    r'finalize \d+\.\d{3}s · total \d+\.\d{2}s',
+                    line.decode(),
+                ), line
+            assert b' timings:' not in result.stderr
+            assert not re.search(rb'(?m)^done .* in ', result.stderr)
         return result
 
     # Missing DBs default to plocate; this suite explicitly builds Rust.

@@ -18,7 +18,14 @@ exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini"]
 name = "mac"
 root = "/"
 exclude_paths = [
-    "/System/Volumes/Data/private",
+    "/System/Volumes/Data",
+    "/System/Volumes/Update",
+    "/System/Volumes/iSCPreboot",
+    "/System/Volumes/Preboot",
+    "/opt/homebrew",
+    "/Users/kongdd/go",
+    "/dev",
+    "/usr",
     "/mnt",
     "/Volumes",
     "/private"

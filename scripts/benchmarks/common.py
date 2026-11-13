@@ -28,7 +28,7 @@ def measure(command):
         sample = {'seconds': elapsed, 'peak_rss_kib': peak}
         errors.seek(0)
         diagnostics = errors.read().decode(errors='replace')
-        phases = re.search(r'timings: scan ([0-9.]+)s .*? index ([0-9.]+)s .*? finalize ([0-9.]+)s', diagnostics)
+        phases = re.search(r'(?:timings: )?scan ([0-9.]+)s .*? index ([0-9.]+)s .*? finalize ([0-9.]+)s', diagnostics)
         if phases:
             sample['native_phase_seconds'] = dict(zip(
                 ['scan', 'index', 'finalize'], map(float, phases.groups())))

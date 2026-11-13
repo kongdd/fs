@@ -72,6 +72,21 @@ pub struct UpdateReport {
     pub finalize_elapsed: Duration,
 }
 
+impl UpdateReport {
+    pub(crate) fn log_timings(&self, total: Duration) {
+        ui::log(
+            Tone::Info,
+            format_args!(
+                "    scan {:.3}s · index {:.3}s · finalize {:.3}s · total {:.2}s",
+                self.scan_elapsed.as_secs_f64(),
+                self.index_elapsed.as_secs_f64(),
+                self.finalize_elapsed.as_secs_f64(),
+                total.as_secs_f64(),
+            ),
+        );
+    }
+}
+
 fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(
         &idx.filters.exclude_dirs,
@@ -1319,16 +1334,6 @@ pub fn update_with_exclusions(
         )
     };
     ui::log(Tone::Success, format_args!("{summary}"));
-    ui::log(
-        Tone::Info,
-        format_args!(
-            "{} timings: scan {:.3}s · index {:.3}s · finalize {:.3}s",
-            idx.name,
-            report.scan_elapsed.as_secs_f64(),
-            report.index_elapsed.as_secs_f64(),
-            report.finalize_elapsed.as_secs_f64()
-        ),
-    );
     Ok(report)
 }
 

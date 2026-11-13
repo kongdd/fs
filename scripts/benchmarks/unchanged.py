@@ -91,7 +91,7 @@ def main():
                 assert 'building stats cache' not in output, output
                 for path, before in snapshots[kind].items():
                     assert fingerprint(path) == before, ('no-op wrote a database', path)
-            timings = re.findall(r'(\S+) timings: scan ([\d.]+)s · index ([\d.]+)s · finalize ([\d.]+)s', output)
+            timings = re.findall(r'(?m)^(\S+)(?: timings: |:[^\n]*\n(?:\t| {4}))scan ([\d.]+)s · index ([\d.]+)s · finalize ([\d.]+)s', output)
             return {'seconds': elapsed, 'indexes': {
                 name: {'scan': float(scan), 'index': float(index), 'finalize': float(finalize)}
                 for name, scan, index, finalize in timings}}

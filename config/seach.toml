@@ -11,6 +11,11 @@ name = "cmip6"
 root = "/mnt/z"
 database = "/mnt/x/config/fs/cmip6.db"
 
+[[index]]
+name = "mac"
+root = "/"
+database = "/Users/kongdd/.config/fs/mac.db"
+
 # [[index]]
 # name = "win_d"
 # root = "/share/d"

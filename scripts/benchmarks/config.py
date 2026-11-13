@@ -118,7 +118,7 @@ def measure(command, profiling):
         rss, user, system = usage.read().split()
     sample = {'seconds': elapsed, 'peak_rss_kib': int(rss), 'user_seconds': float(user),
               'system_seconds': float(system), 'diagnostics': diagnostics}
-    phases = re.search(r'timings: scan ([\d.]+)s .*? index ([\d.]+)s .*? finalize ([\d.]+)s', diagnostics)
+    phases = re.search(r'(?:timings: )?scan ([\d.]+)s .*? index ([\d.]+)s .*? finalize ([\d.]+)s', diagnostics)
     if phases:
         sample['native_phase_seconds'] = dict(zip(['scan', 'index', 'finalize'], map(float, phases.groups())))
     sample['stats_build_seconds'] = sum(map(float, re.findall(r'stats cached: .*? in ([\d.]+)s', diagnostics)))

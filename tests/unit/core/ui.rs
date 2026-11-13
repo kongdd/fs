@@ -6,7 +6,25 @@ fn color_respects_terminal_and_environment() {
     assert!(!color_enabled(false, false, Some("xterm")));
     assert!(!color_enabled(true, true, Some("xterm")));
     assert!(!color_enabled(true, false, Some("dumb")));
-    assert_eq!(paint("done", Tone::Success, false), "done");
+    for tone in [
+        Tone::Info,
+        Tone::Success,
+        Tone::Summary,
+        Tone::Warning,
+        Tone::Error,
+    ] {
+        assert_eq!(paint("plain", tone, false), "plain");
+    }
+    assert_eq!(paint("info", Tone::Info, true), "\x1b[36minfo\x1b[0m");
+    assert_eq!(paint("done", Tone::Success, true), "\x1b[32mdone\x1b[0m");
+    assert_eq!(
+        paint("total", Tone::Summary, true),
+        "\x1b[1;32mtotal\x1b[0m"
+    );
+    assert_eq!(
+        paint("warning", Tone::Warning, true),
+        "\x1b[1;33mwarning\x1b[0m"
+    );
     assert_eq!(paint("error", Tone::Error, true), "\x1b[1;31merror\x1b[0m");
 }
 

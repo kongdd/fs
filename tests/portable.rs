@@ -96,12 +96,18 @@ fn split_configs_use_matching_databases_with_local_roots() {
             .find(|idx| idx.name == selected.name)
             .unwrap();
         assert!(selected.root.is_absolute());
-        let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume2") {
+        // /mnt/x mounts /volume2/GitHub, not the whole /volume2 volume.
+        let database = if let Ok(relative) = idx.update_database().strip_prefix("/volume2/GitHub") {
             PathBuf::from("/mnt/x").join(relative)
         } else {
             idx.update_database().to_path_buf()
         };
-        assert_eq!(selected.search_database(), database);
+        assert_eq!(
+            selected.search_database(),
+            database,
+            "index {}",
+            selected.name
+        );
     }
 }
 

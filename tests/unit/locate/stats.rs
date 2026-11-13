@@ -5,6 +5,7 @@ use super::*;
 fn options(recursive: bool, top: usize) -> StatsOptions {
     StatsOptions {
         path: None,
+        positional_path: None,
         top: NonZeroUsize::new(top).unwrap(),
         indexes: Vec::new(),
         recursive,

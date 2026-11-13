@@ -83,22 +83,48 @@ fn filter_key(idx: &IndexConfig) -> Result<Vec<u8>> {
     ))?)
 }
 
-// A stricter directory-name filter can be applied to the stored tree. Removing
-// an exclusion still needs discovery: ignored children were never stored.
-fn only_adds_directory_exclusions(old: Option<&[u8]>, idx: &IndexConfig) -> bool {
+// Stricter filters can prune the stored tree. Removing an exclusion still
+// needs discovery: ignored children were never stored. Return newly added paths
+// so only their parents need to reread filename blocks (including excluded files).
+fn added_path_exclusions(old: Option<&[u8]>, idx: &IndexConfig) -> Option<Vec<PathBuf>> {
     type Key = (Vec<String>, Vec<Vec<u8>>);
-    let Some((old_names, old_paths)) = old.and_then(|key| serde_json::from_slice::<Key>(key).ok())
-    else {
-        return false;
-    };
-    old_names
+    let (old_names, old_paths) = serde_json::from_slice::<Key>(old?).ok()?;
+    let paths: Vec<_> = idx
+        .filters
+        .exclude_paths
+        .iter()
+        .map(|p| path_bytes(p))
+        .collect();
+    if !old_names
         .iter()
         .all(|name| idx.filters.exclude_dirs.contains(name))
-        && old_paths.len() == idx.filters.exclude_paths.len()
-        && old_paths
+        || !old_paths
             .iter()
-            .zip(&idx.filters.exclude_paths)
-            .all(|(old, new)| old.as_slice() == path_bytes(new).as_ref())
+            .all(|path| paths.iter().any(|new| new.as_ref() == path))
+    {
+        return None;
+    }
+    Some(
+        idx.filters
+            .exclude_paths
+            .iter()
+            .zip(paths)
+            .filter_map(|(path, bytes)| {
+                if old_paths.iter().any(|old| old.as_slice() == bytes.as_ref()) {
+                    return None;
+                }
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    idx.root.join(path)
+                };
+                // An exclusion equal to or above the root is ignored by listing_filter.
+                path.parent()
+                    .is_some_and(|parent| path_starts_with(parent, &idx.root))
+                    .then_some(path)
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone)]
@@ -641,10 +667,7 @@ impl DirectoryPostings<'_> {
                 }
                 Ok(())
             }
-            Self::Update { postings, lists } => {
-                postings.add(connection, directory, lists, codec)?;
-                postings.flush(connection)
-            }
+            Self::Update { postings, lists } => postings.add(connection, directory, lists, codec),
         }
     }
 }
@@ -676,6 +699,7 @@ impl PostingWriter {
 #[derive(Default)]
 struct PostingBatch {
     lists: HashMap<u32, Vec<u64>>,
+    removed: HashMap<u32, Vec<u64>>,
     count: usize,
 }
 
@@ -699,23 +723,53 @@ impl PostingBatch {
         Ok(())
     }
 
+    fn remove(&mut self, connection: &Connection, keys: Vec<u64>, ids: &[u64]) -> Result<()> {
+        for gram in keys {
+            let gram = gram as u32;
+            // A block ID can be reused after deletion. Discard prior buffered
+            // additions now; additions after this removal must survive flush.
+            if let Some(added) = self.lists.get_mut(&gram) {
+                added.retain(|id| ids.binary_search(id).is_err());
+            }
+            self.removed.entry(gram).or_default().extend_from_slice(ids);
+            self.count += ids.len();
+        }
+        if self.count >= 262_144 {
+            self.flush(connection)?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self, connection: &Connection) -> Result<()> {
-        let mut lists: Vec<_> = self.lists.drain().collect();
-        lists.sort_unstable_by_key(|(gram, _)| *gram);
+        let mut keys: Vec<_> = self
+            .lists
+            .keys()
+            .chain(self.removed.keys())
+            .copied()
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
         let mut select = connection.prepare_cached("SELECT data FROM postings WHERE gram=?")?;
         let mut insert = connection.prepare_cached("INSERT INTO postings(gram,data,n) VALUES (?,?,?) ON CONFLICT(gram) DO UPDATE SET data=excluded.data,n=excluded.n")?;
-        for (gram, mut ids) in lists {
-            if let Some(data) = select
-                .query_row([gram], |r| r.get::<_, Vec<u8>>(0))
-                .optional()?
-            {
-                let mut previous = unpack(&data)?;
-                previous.append(&mut ids);
-                ids = previous;
+        let mut delete = connection.prepare_cached("DELETE FROM postings WHERE gram=?")?;
+        for gram in keys {
+            let data: Option<Vec<u8>> = select.query_row([gram], |r| r.get(0)).optional()?;
+            let mut ids = data
+                .map(|data| unpack(&data))
+                .transpose()?
+                .unwrap_or_default();
+            if let Some(mut removed) = self.removed.remove(&gram) {
+                removed.sort_unstable();
+                ids.retain(|id| removed.binary_search(id).is_err());
             }
+            ids.extend(self.lists.remove(&gram).unwrap_or_default());
             ids.sort_unstable();
             ids.dedup();
-            insert.execute(params![gram, pack(&ids), ids.len() as i64])?;
+            if ids.is_empty() {
+                delete.execute([gram])?;
+            } else {
+                insert.execute(params![gram, pack(&ids), ids.len() as i64])?;
+            }
         }
         self.count = 0;
         Ok(())
@@ -726,25 +780,20 @@ fn clear_postings(
     connection: &Connection,
     directory: i64,
     codec: &mut DirectoryGrams,
+    writer: &mut PostingWriter,
 ) -> Result<()> {
-    let keys = codec.read(connection, directory)?;
+    let keys = codec
+        .read(connection, directory)
+        .with_context(|| format!("cannot read grams for directory {directory}"))?;
     let old_ids = connection
         .prepare_cached("SELECT id FROM blocks WHERE directory=? ORDER BY id")?
         .query_map([directory], |r| r.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut select = connection.prepare_cached("SELECT data FROM postings WHERE gram=?")?;
-    let mut update = connection.prepare_cached("UPDATE postings SET data=?,n=? WHERE gram=?")?;
-    let mut delete = connection.prepare_cached("DELETE FROM postings WHERE gram=?")?;
-    for gram in keys {
-        let data: Vec<u8> = select.query_row([gram as i64], |r| r.get(0))?;
-        let mut ids = unpack(&data)?;
-        ids.retain(|&id| old_ids.binary_search(&(id as i64)).is_err());
-        if ids.is_empty() {
-            delete.execute([gram as i64])?;
-        } else {
-            update.execute(params![pack(&ids), ids.len() as i64, gram as i64])?;
-        }
-    }
+    let PostingWriter::Update(batch) = writer else {
+        bail!("cannot remove postings during initialization");
+    };
+    let old_ids: Vec<_> = old_ids.into_iter().map(|id| id as u64).collect();
+    batch.remove(connection, keys, &old_ids)?;
     connection.execute("DELETE FROM directory_grams WHERE directory=?", [directory])?;
     Ok(())
 }
@@ -862,9 +911,10 @@ pub fn update_with_exclusions(
         bail!("root or directory exclusions changed; run a full index update before --folder");
     }
     let filters_changed = old_key.as_ref() != Some(&key);
-    let added_exclusions =
-        filters_changed && only_adds_directory_exclusions(old_key.as_deref(), idx);
-    let force = filters_changed && !added_exclusions;
+    let added_exclusions = filters_changed
+        .then(|| added_path_exclusions(old_key.as_deref(), idx))
+        .flatten();
+    let force = filters_changed && added_exclusions.is_none();
     let scan_root = scope.unwrap_or(&idx.root);
     let stored_scope = paths.encode(scan_root)?;
     let snapshot_start = Instant::now();
@@ -874,8 +924,8 @@ pub fn update_with_exclusions(
         incremental::DirectorySnapshot::default()
     };
     let rules = ScanRules::with_exclusions(idx, extra_exclusions);
-    let refilter = if added_exclusions {
-        snapshot.prune_ignored(&transaction, &rules.directories)?
+    let refilter = if let Some(excluded_paths) = added_exclusions {
+        snapshot.prune_ignored(&transaction, &rules.directories, &idx.root, &excluded_paths)?
     } else {
         HashSet::new()
     };
@@ -895,7 +945,6 @@ pub fn update_with_exclusions(
         (existing && jobs > 1).then(|| scan::StatPool::new(&idx.root, jobs as usize));
     let mut stat_ready = Vec::new();
     let mut visited = HashSet::with_capacity(snapshot.directories.len());
-    let mut new_directories = Vec::new();
     let mut report = UpdateReport {
         scan_elapsed: snapshot_elapsed,
         ..Default::default()
@@ -989,27 +1038,16 @@ pub fn update_with_exclusions(
         let sql_start = profiling.then(Instant::now);
         let stored_path = paths.encode(&directory)?;
         let previous = snapshot.directories.get(stored_path.as_ref());
-        let id = if let Some(previous) = previous {
-            previous.id
-        } else {
-            transaction
-                .prepare_cached("INSERT INTO directories(path,stamp) VALUES (?,?)")?
-                .execute(params![stored_path.as_ref(), &before])?;
-            let id = transaction.last_insert_rowid();
-            if existing {
-                new_directories.push(id);
-            }
-            id
-        };
         if let Some(start) = sql_start {
             directory_sql_elapsed += start.elapsed();
         }
-        if existing {
-            visited.insert(id);
+        if let Some(previous) = previous {
+            visited.insert(previous.id);
         }
         if !force
-            && !refilter.contains(&id)
-            && previous.is_some_and(|previous| stamp_matches(&previous.stamp, &before))
+            && previous.is_some_and(|previous| {
+                !refilter.contains(&previous.id) && stamp_matches(&previous.stamp, &before)
+            })
         {
             let previous = previous.expect("reused directory has a stored stamp");
             pending.extend(
@@ -1050,10 +1088,18 @@ pub fn update_with_exclusions(
                         }
                         scan::warn_unreadable(&directory, &error);
                         report.skipped += 1;
-                        if previous.is_some() && !vanished {
-                            retain_indexed(&snapshot, &paths, &directory, id, &mut visited)?;
-                        } else if existing {
-                            visited.remove(&id);
+                        if let Some(previous) = previous {
+                            if vanished {
+                                visited.remove(&previous.id);
+                            } else {
+                                retain_indexed(
+                                    &snapshot,
+                                    &paths,
+                                    &directory,
+                                    previous.id,
+                                    &mut visited,
+                                )?;
+                            }
                         }
                         continue;
                     }
@@ -1061,8 +1107,21 @@ pub fn update_with_exclusions(
             };
             report.scan_elapsed += scan_start.elapsed();
             let index_start = Instant::now();
+            // Unreadable new directories have no blocks or reverse grams. Do
+            // not insert a row that finalization would mistake for indexed data.
+            let id = if let Some(previous) = previous {
+                previous.id
+            } else {
+                transaction
+                    .prepare_cached("INSERT INTO directories(path,stamp) VALUES (?,?)")?
+                    .execute(params![stored_path.as_ref(), &before])?;
+                transaction.last_insert_rowid()
+            };
+            if existing {
+                visited.insert(id);
+            }
             if previous.is_some() {
-                clear_postings(&transaction, id, &mut gram_codec)?;
+                clear_postings(&transaction, id, &mut gram_codec, &mut batch)?;
                 transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
                 transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
             }
@@ -1209,10 +1268,8 @@ pub fn update_with_exclusions(
     let unchanged = existing
         && !filters_changed
         && report.scanned == 0
-        && new_directories.is_empty()
         && visited.len() == snapshot.directories.len();
     if !unchanged {
-        batch.flush(&transaction)?;
         if !existing {
             transaction.execute_batch(
                 "CREATE UNIQUE INDEX directory_paths ON directories(path);
@@ -1221,19 +1278,15 @@ pub fn update_with_exclusions(
         }
         // The snapshot covers exactly the selected scope. No second directory
         // SQL scan, path decoding, or component-prefix check is needed.
-        for id in snapshot
-            .directories
-            .values()
-            .map(|directory| directory.id)
-            .chain(new_directories)
-        {
+        for id in snapshot.directories.values().map(|directory| directory.id) {
             if !visited.contains(&id) {
-                clear_postings(&transaction, id, &mut gram_codec)?;
+                clear_postings(&transaction, id, &mut gram_codec, &mut batch)?;
                 transaction.execute("DELETE FROM blocks WHERE directory=?", [id])?;
                 transaction.execute("DELETE FROM children WHERE directory=?", [id])?;
                 transaction.execute("DELETE FROM directories WHERE id=?", [id])?;
             }
         }
+        batch.flush(&transaction)?;
         if !existing {
             gram_codec.finish_fresh(&transaction)?;
         }

@@ -372,7 +372,7 @@ fn exclusions_rebuild_when_changed_and_do_not_follow_symlinks() {
 }
 
 #[test]
-fn added_directory_exclusions_require_unchanged_paths_and_preserved_names() {
+fn stricter_exclusions_preserve_old_names_and_paths_regardless_of_order() {
     let mut fixture = Fixture::new();
     fixture.idx.filters.exclude_dirs = vec!["old".into()];
     fixture.idx.filters.exclude_paths = vec!["cache".into(), "中文".into()];
@@ -381,23 +381,20 @@ fn added_directory_exclusions_require_unchanged_paths_and_preserved_names() {
         (vec!["old"], vec!["cache", "中文"], true),
         (vec!["new", "old"], vec!["cache", "中文"], true),
         (vec!["new"], vec!["cache", "中文"], false),
-        (vec!["old"], vec!["中文", "cache"], false),
+        (vec!["old"], vec!["中文", "cache"], true),
         (vec!["old"], vec!["cache", "other"], false),
         (vec!["old"], vec!["cache"], false),
-        (vec!["old"], vec!["cache", "中文", "other"], false),
+        (vec!["old"], vec!["cache", "中文", "other"], true),
     ] {
         fixture.idx.filters.exclude_dirs = names.into_iter().map(String::from).collect();
         fixture.idx.filters.exclude_paths = paths.into_iter().map(PathBuf::from).collect();
         assert_eq!(
-            only_adds_directory_exclusions(Some(&old), &fixture.idx),
+            added_path_exclusions(Some(&old), &fixture.idx).is_some(),
             expected
         );
     }
-    assert!(!only_adds_directory_exclusions(None, &fixture.idx));
-    assert!(!only_adds_directory_exclusions(
-        Some(b"invalid"),
-        &fixture.idx
-    ));
+    assert!(added_path_exclusions(None, &fixture.idx).is_none());
+    assert!(added_path_exclusions(Some(b"invalid"), &fixture.idx).is_none());
 }
 
 #[test]
@@ -477,6 +474,89 @@ fn added_directory_exclusions_prune_stored_subtrees_and_only_rescan_parents() {
         fixture.idx.filters.exclude_dirs.clear();
         update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
         assert_eq!(fixture.query(&["shared.nc"], true, false, false).len(), 3);
+    }
+}
+
+#[test]
+fn added_path_exclusions_prune_subtrees_and_files_without_rewriting_other_directories() {
+    for jobs in [1, 4] {
+        let mut fixture = Fixture::new();
+        for name in ["raw/deep", "kept/deep", "raw-other", "already"] {
+            fs::create_dir_all(fixture.idx.root.join(name)).unwrap();
+            fs::write(fixture.idx.root.join(name).join("shared.nc"), b"").unwrap();
+        }
+        fs::write(fixture.idx.root.join("kept/hidden.nc"), b"").unwrap();
+        fs::write(fixture.idx.root.join("kept/visible.nc"), b"").unwrap();
+        fixture.idx.filters.exclude_paths = vec!["already".into(), "kept/deep/absent.nc".into()];
+        update(&fixture.idx, None, false).unwrap();
+        let connection = Connection::open(&fixture.idx.database).unwrap();
+        let untouched = || {
+            connection
+                .prepare(
+                    "SELECT b.id,b.data FROM blocks b JOIN directories d ON d.id=b.directory
+                 WHERE d.path IN (?1,?2) ORDER BY b.id",
+                )
+                .unwrap()
+                .query_map(
+                    params![b"kept/deep".as_slice(), b"raw-other".as_slice()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = untouched();
+        assert!(!before.is_empty());
+        // Mix relative/absolute paths, nested exclusions and a file exclusion.
+        fixture.idx.filters.exclude_paths.extend([
+            "raw".into(),
+            fixture.idx.root.join("raw/deep"),
+            fixture.idx.root.join("kept/hidden.nc"),
+        ]);
+        let report = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(report.scanned, 2, "only root and kept need rereading");
+        assert_eq!(report.reused, 2);
+        assert_eq!(untouched(), before);
+        assert!(fixture.query(&["hidden.nc"], true, false, false).is_empty());
+        assert_eq!(fixture.query(&["shared.nc"], true, false, false).len(), 2);
+        assert_eq!(fixture.query(&["visible.nc"], true, false, false).len(), 1);
+        assert_eq!(fixture.query(&["raw"], true, false, false).len(), 1);
+        // Compare all filenames and indexed queries to an independent fresh build.
+        let mut fresh = fixture.idx.clone();
+        fresh.database = fixture.idx.database.with_file_name("fresh.db");
+        let built = update_with_jobs(&fresh, None, false, jobs).unwrap();
+        assert_eq!(report.entries, built.entries);
+        for pattern in ["*", "shared.nc", "raw", "visible", "hidden.nc"] {
+            let options = SearchOptions {
+                patterns: vec![pattern.into()],
+                basename: true,
+                ..Default::default()
+            };
+            let mut expected = Vec::new();
+            visit(&fresh, &Query::new(&options).unwrap(), |path| {
+                expected.push(path.to_vec());
+                Ok(true)
+            })
+            .unwrap();
+            expected.sort();
+            assert_eq!(fixture.query(&[pattern], true, false, false), expected);
+        }
+        fixture.idx.filters.exclude_paths.reverse();
+        let reordered = update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(reordered.scanned, 0);
+        assert_eq!(reordered.reused, 4);
+        let before_noop = fs::read(&fixture.idx.database).unwrap();
+        assert_eq!(
+            update_with_jobs(&fixture.idx, None, false, jobs)
+                .unwrap()
+                .scanned,
+            0
+        );
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), before_noop);
+        fixture.idx.filters.exclude_paths = vec!["already".into(), "kept/deep/absent.nc".into()];
+        update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(fixture.query(&["shared.nc"], true, false, false).len(), 3);
+        assert_eq!(fixture.query(&["hidden.nc"], true, false, false).len(), 1);
     }
 }
 
@@ -708,6 +788,68 @@ fn posting_batch_flushes_and_merges_sorted_unique_ids() {
         .unwrap();
     assert_eq!(n, 262_145);
     assert_eq!(unpack(&data).unwrap(), (1..=262_145).collect::<Vec<_>>());
+}
+
+#[test]
+fn posting_batch_merges_removals_and_reused_ids_in_order() {
+    let connection = Connection::open_in_memory().unwrap();
+    schema(&connection).unwrap();
+    for (gram, ids) in [(1, vec![1, 2]), (2, vec![2])] {
+        connection
+            .execute(
+                "INSERT INTO postings VALUES (?,?,?)",
+                params![gram, pack(&ids), ids.len() as i64],
+            )
+            .unwrap();
+    }
+    let mut batch = PostingBatch::default();
+    let mut codec = DirectoryGrams::new(&connection).unwrap();
+    batch.remove(&connection, vec![1, 2], &[2]).unwrap();
+    batch
+        .add(
+            &connection,
+            1,
+            HashMap::from([(1, vec![2, 3]), (3, vec![2])]),
+            &mut codec,
+        )
+        .unwrap();
+    // Remove an addition that has not been flushed, then reuse the ID again.
+    batch.remove(&connection, vec![1, 3], &[2]).unwrap();
+    batch
+        .add(
+            &connection,
+            2,
+            HashMap::from([(1, vec![2]), (4, vec![2])]),
+            &mut codec,
+        )
+        .unwrap();
+    let original: Vec<u8> = connection
+        .query_row("SELECT data FROM postings WHERE gram=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        unpack(&original).unwrap(),
+        vec![1, 2],
+        "writes must be batched"
+    );
+    batch.flush(&connection).unwrap();
+    let postings = connection
+        .prepare("SELECT gram,data FROM postings ORDER BY gram")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (gram, data) = row.unwrap();
+            (gram, unpack(&data).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(postings, vec![(1, vec![1, 2, 3]), (4, vec![2])]);
+    assert_eq!(batch.count, 0);
+    assert!(batch.lists.is_empty());
+    assert!(batch.removed.is_empty());
 }
 
 #[test]
@@ -1354,6 +1496,48 @@ fn unreadable_directory_is_skipped_and_previous_entries_are_kept() {
     result.unwrap();
     assert_eq!(fixture.query(&["hidden.txt"], true, false, false).len(), 1);
     assert_eq!(fixture.query(&["later.txt"], true, false, false).len(), 1);
+}
+
+#[test]
+fn unreadable_new_directories_do_not_leave_unindexed_rows_or_write_on_retry() {
+    for jobs in [1, 4] {
+        let fixture = Fixture::new();
+        let blocked = fixture.idx.root.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("hidden.txt"), b"").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+        if fs::read_dir(&blocked).is_ok() {
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+            continue;
+        }
+        let result = (|| -> Result<_> {
+            update_with_jobs(&fixture.idx, None, false, jobs)?;
+            let before = fs::read(&fixture.idx.database)?;
+            let first = update_with_jobs(&fixture.idx, None, false, jobs)?;
+            let second = update_with_jobs(&fixture.idx, None, false, jobs)?;
+            Ok((before, first, second))
+        })();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        let (before, first, second) = result.unwrap();
+        for report in [first, second] {
+            assert_eq!(report.scanned, 0);
+            assert_eq!(report.reused, 1);
+            assert_eq!(report.skipped, 1);
+        }
+        assert_eq!(fs::read(&fixture.idx.database).unwrap(), before);
+        let connection = open_read(&fixture.idx.database).unwrap();
+        let directories: i64 = connection
+            .query_row("SELECT COUNT(*) FROM directories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(directories, 1);
+        assert!(
+            fixture
+                .query(&["hidden.txt"], true, false, false)
+                .is_empty()
+        );
+        update_with_jobs(&fixture.idx, None, false, jobs).unwrap();
+        assert_eq!(fixture.query(&["hidden.txt"], true, false, false).len(), 1);
+    }
 }
 
 #[test]

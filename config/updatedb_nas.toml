@@ -2,12 +2,13 @@
 # Use Rust so macOS can query these databases. New paths leave old plocate DBs intact.
 # /volume1/CMIP6 is mounted as /mnt/z on the Mac.
 engine = "rust"
-outdir = "/volume2/config/fs"
+outdir = "/volume2/GitHub/config/fs"
 
 [filters]
 # Installed environments, dependency trees, caches and NAS/system metadata.
 # Keep project directories and source files; add custom installation paths below.
 exclude_dirs = [
+  "raw", "hourly", "GuangXi", "piControl", "L2_HR_LakeSP",
   ".git", "node_modules", "target",
   ".julia", ".conda", "anaconda3", "miniconda3", "miniforge3", "mambaforge",
   ".venv", "venv", "site-packages", "__pycache__", ".tox", ".nox",

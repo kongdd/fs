@@ -2,12 +2,13 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{os_string, pack, unpack};
+use super::{os_string, pack, path_starts_with, same_path, unpack};
 
 pub(super) struct StoredDirectory {
     pub id: i64,
@@ -21,7 +22,7 @@ pub(super) struct DirectorySnapshot {
 }
 
 impl DirectorySnapshot {
-    /// Apply added directory-name exclusions to the stored tree, without
+    /// Apply added directory-name and path exclusions to the stored tree, without
     /// visiting excluded subtrees. Rewrite each affected global posting once,
     /// not once per removed directory. Only surviving parents need a readdir
     /// to remove excluded child markers from their own filename blocks.
@@ -29,22 +30,35 @@ impl DirectorySnapshot {
         &mut self,
         connection: &Connection,
         names: &HashSet<OsString>,
+        root: &Path,
+        paths: &[PathBuf],
     ) -> Result<HashSet<i64>> {
         let names_bytes: HashSet<_> = names.iter().map(|name| name.as_encoded_bytes()).collect();
-        let mut removed = Vec::new();
+        let mut removed = HashSet::new();
         let mut parents = HashSet::new();
-        self.directories.retain(|path, directory| {
+        for (path, directory) in &self.directories {
+            let absolute = root.join(os_string(path.clone())?);
             let ignored = !path.is_empty()
-                && path
+                && (path
                     .split(|&byte| byte == b'/')
-                    .any(|part| names_bytes.contains(part));
+                    .any(|part| names_bytes.contains(part))
+                    || paths
+                        .iter()
+                        .any(|blocked| path_starts_with(&absolute, blocked)));
             if ignored {
-                removed.push(directory.id);
-            } else if directory.children.iter().any(|name| names.contains(name)) {
+                removed.insert(directory.id);
+            } else if directory.children.iter().any(|name| names.contains(name))
+                || paths.iter().any(|blocked| {
+                    blocked
+                        .parent()
+                        .is_some_and(|parent| same_path(parent, &absolute))
+                })
+            {
                 parents.insert(directory.id);
             }
-            !ignored
-        });
+        }
+        self.directories
+            .retain(|_, directory| !removed.contains(&directory.id));
         if removed.is_empty() {
             return Ok(parents);
         }

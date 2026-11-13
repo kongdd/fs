@@ -11,6 +11,22 @@ name = "cmip6"
 root = "/mnt/z"
 database = "/mnt/x/config/fs/cmip6.db"
 
+# [[index]]
+# name = "win_d"
+# root = "/share/d"
+# database = "/mnt/x/config/fs/win_d.db"
+
+# [[index]]
+# name = "win_e"
+# root = "/share/e"
+# database = "/mnt/x/config/fs/win_e.db"
+
+# [[index]]
+# name = "win_f"
+# root = "/share/f"
+# database = "/mnt/x/config/fs/win_f.db"
+
+
 [[index]]
 name = "github"
 root = "/mnt/z/GitHub"

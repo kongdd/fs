@@ -102,6 +102,14 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     assert (base / 'index.db').read_bytes() == before
     initial_stats = run('stats', '-n10').stdout
     assert b'building stats cache' not in run('stats').stderr
+    for recursive in ['true', 'false']:
+        scoped = run('stats', str(root / 'nested'), '--recursive', recursive)
+        named = run('stats', '--path', str(root / 'nested'), '--recursive', recursive)
+        assert named.stdout == scoped.stdout
+        assert named.stderr == scoped.stderr
+        assert encoded(root / 'nested') in named.stdout
+        assert encoded(root / 'soil_ERA5.nc') not in named.stdout
+    assert run('stats', '--path', str(root) + '-other').stdout.splitlines() == [b'     ENTRIES  DIRECTORY']
     # Directory stamps intentionally have whole-second resolution.
     time.sleep(1.1)
     (root / 'nested/rain.nc').rename(root / 'nested/renamed.nc')
@@ -123,6 +131,7 @@ with tempfile.TemporaryDirectory(prefix='fs-native-e2e-') as temporary:
     root.rename(base / 'offline')
     assert run('search', '-0', 'bad').stdout == invalid + b'\0'
     assert run('stats', '-n10').stdout == expected_stats
+    assert run('stats', '--path', str(root / 'nested')).stdout == run('stats', str(root / 'nested')).stdout
     before = (base / 'index.db').read_bytes()
     run('index', 'update', '--no-progress', ok=False)
     assert (base / 'index.db').read_bytes() == before

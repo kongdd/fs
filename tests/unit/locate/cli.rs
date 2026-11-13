@@ -350,6 +350,44 @@ fn stats_is_a_command_with_explicit_boolean_and_positive_top() {
 }
 
 #[test]
+fn stats_accepts_path_option_and_legacy_positional_path() {
+    for path in ["/data/project", "relative/path", "path with spaces"] {
+        for named in [false, true] {
+            let mut args = vec!["fs", "stats"];
+            if named {
+                args.push("--path");
+            }
+            args.extend([path, "-n20", "-d", "cmip6", "--recursive", "false"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Stats(options) = cli.command else {
+                panic!("expected stats command");
+            };
+            assert_eq!(
+                options
+                    .path
+                    .as_deref()
+                    .or(options.positional_path.as_deref()),
+                Some(std::path::Path::new(path))
+            );
+            assert_eq!(options.path.is_some(), named);
+            assert_eq!(options.top.get(), 20);
+            assert_eq!(options.indexes, ["cmip6"]);
+            assert!(!options.recursive);
+        }
+    }
+    let cli = Cli::try_parse_from(["fs", "stats", "--path=/data"]).unwrap();
+    assert!(matches!(cli.command, Commands::Stats(options)
+        if options.path == Some(PathBuf::from("/data"))));
+    assert!(Cli::try_parse_from(["fs", "stats", "--path"]).is_err());
+    for args in [
+        ["fs", "stats", "--path", "/data", "/other"],
+        ["fs", "stats", "/other", "--path", "/data"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn ignore_commands_are_not_implicit_searches() {
     for args in [
         vec![

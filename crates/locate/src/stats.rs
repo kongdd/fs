@@ -20,7 +20,11 @@ mod cache;
 #[derive(clap::Args, Debug)]
 pub struct StatsOptions {
     /// Restrict ranking to this subtree. No filesystem traversal is performed.
+    #[arg(long, value_name = "PATH", conflicts_with = "positional_path")]
     pub path: Option<PathBuf>,
+    /// Subtree to rank (alternative to --path).
+    #[arg(value_name = "PATH")]
+    pub positional_path: Option<PathBuf>,
     /// Number of results.
     #[arg(short = 'n', long = "top", default_value = "10")]
     pub top: NonZeroUsize,
@@ -36,7 +40,12 @@ pub fn stats(cfg: &Config, options: &StatsOptions) -> Result<()> {
     for idx in cfg.select(&options.indexes)? {
         crate::index_search::is_rust_index(&idx.database)?;
     }
-    let root = options.path.as_deref().map(absolute_path).transpose()?;
+    let root = options
+        .path
+        .as_deref()
+        .or(options.positional_path.as_deref())
+        .map(absolute_path)
+        .transpose()?;
     let mut connection = cache::open(cfg)?;
     let cached = cache::ensure(&mut connection, cfg, &options.indexes)?;
     // Keep the totals and rankings in one SQLite read snapshot during refreshes.

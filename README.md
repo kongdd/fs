@@ -149,7 +149,8 @@ fs ignore rm cache node_modules 'cache with spaces'
 ```sh
 fs stats                            # 默认列出前 10 个目录，统计全部后代
 fs stats -n20                       # -n / --top：排行数量
-fs stats /data/project -n20          # 限定子树；也可用相对路径
+fs stats --path /data/project -n20   # 限定子树；也可用相对路径
+fs stats /data/project -n20          # 兼容位置参数写法，与 --path 二选一
 fs stats -d research -d github
 fs stats --recursive false           # 只统计各目录的直接子项
 fs doctor                           # 检查配置、根目录、数据库及后端依赖

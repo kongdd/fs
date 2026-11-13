@@ -13,7 +13,13 @@ exclude_dirs = [
 exclude_extensions = ["tmp", "part", "pyc", "pyo", "rlib", "rmeta"]
 exclude_files = [".DS_Store", "Thumbs.db", "desktop.ini"]
 
+# root = "/Users/kongdd"
 [[index]]
 name = "mac"
-root = "/Users/kongdd"
-exclude_paths = []
+root = "/"
+exclude_paths = [
+    "/System/Volumes/Data/private",
+    "/mnt",
+    "/Volumes",
+    "/private"
+]

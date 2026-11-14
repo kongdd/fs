@@ -93,4 +93,4 @@ jobs:
           sha256sum *.tar.gz *.zip > SHA256SUMS.txt
           gh release create "$TAG" *.tar.gz *.zip SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-            --title "fs $TAG · Linux / macOS / Windows" --notes-file ../INSTALL.md
+            --title "fs $TAG · Linux / macOS / Windows" --notes-file ../README.md

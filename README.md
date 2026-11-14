@@ -14,7 +14,9 @@ Linux 还可显式选择 plocate 后端；默认不依赖外部索引工具。
 
 ## 安装与快速上手
 
-在仓库根目录安装：
+从 [Releases](https://github.com/kongdd/fs/releases) 下载适合操作系统和架构的压缩包，解压后将 `fs`（Windows 为 `fs.exe`）放入 PATH 中的目录。压缩包中的 `config.toml.example` 可供配置参考。
+
+也可在仓库根目录从源码安装：
 
 ```sh
 cargo install --path . --locked
@@ -24,8 +26,6 @@ fs updatedb -j 8
 fs locate soil
 fs stats
 ```
-
-预编译包见 [Releases](https://github.com/kongdd/fs/releases)，安装步骤见 [INSTALL.md](INSTALL.md)。
 
 ## 用法
 

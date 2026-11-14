@@ -27,7 +27,7 @@ package.mkdir(parents=True, exist_ok=True)
 binary = "fs.exe" if system == "windows" else "fs"
 target_dir = root / os.environ.get("CARGO_TARGET_DIR", "target")
 shutil.copy2(target_dir / args.target / "release" / binary, package / binary)
-shutil.copy2(root / "INSTALL.md", package / "README.md")
+shutil.copy2(root / "README.md", package / "README.md")
 shutil.copy2(root / "LICENSE", package / "LICENSE")
 example = "updatedb_win.toml" if system == "windows" else "updatedb_nas.toml"
 shutil.copy2(root / "config" / example, package / "config.toml.example")
